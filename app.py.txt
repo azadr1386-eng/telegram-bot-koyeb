@@ -2,7 +2,7 @@ import os
 import logging
 import sqlite3
 from fastapi import FastAPI, Request, Response
-from telegram import Update
+from telegram import Update, ChatMember
 from telegram.constants import ParseMode
 from telegram.ext import (
     Application,
@@ -20,7 +20,7 @@ logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
 )
 
-# ================== دیتابیس ساده برای ذخیره تریگرها
+# ================== دیتابیس ساده
 DB_FILE = "bot_settings.db"
 
 def init_db():
@@ -32,6 +32,14 @@ def init_db():
                 chat_id INTEGER,
                 trigger TEXT,
                 delay INTEGER
+            )
+            """
+        )
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS user_groups (
+                user_id INTEGER,
+                chat_id INTEGER
             )
             """
         )
@@ -59,6 +67,26 @@ def clear_triggers(chat_id: int):
         cursor = conn.cursor()
         cursor.execute("DELETE FROM triggers WHERE chat_id = ?", (chat_id,))
         conn.commit()
+
+def add_user_group(user_id: int, chat_id: int):
+    with sqlite3.connect(DB_FILE) as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "INSERT INTO user_groups (user_id, chat_id) VALUES (?, ?)", (user_id, chat_id)
+        )
+        conn.commit()
+
+def remove_user(user_id: int):
+    with sqlite3.connect(DB_FILE) as conn:
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM user_groups WHERE user_id = ?", (user_id,))
+        conn.commit()
+
+def get_user_groups(user_id: int):
+    with sqlite3.connect(DB_FILE) as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT chat_id FROM user_groups WHERE user_id = ?", (user_id,))
+        return [row[0] for row in cursor.fetchall()]
 
 # ================== هندلرها
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -88,15 +116,43 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message or not update.message.text:
         return
 
-    chat_id = update.effective_chat.id
-    triggers = get_triggers(chat_id)
     text = update.message.text
+    chat_id = update.effective_chat.id
+    user_id = update.effective_user.id
+    user_name = update.effective_user.full_name
+    group_name = update.effective_chat.title or "Private Chat"
 
+    # ✅ بررسی خروج (حتی وسط جمله)
+    if "#خروج" in text:
+        remove_user(user_id)
+        await update.message.reply_text(
+            "✅ شما از لیست گروه‌های فعال حذف شدید. حالا می‌توانید به گروه دیگری وارد شوید."
+        )
+        return
+
+    # ✅ بررسی چند گروهی
+    groups = get_user_groups(user_id)
+    if chat_id not in groups:
+        # بررسی ادمین بودن
+        member = await context.bot.get_chat_member(chat_id, user_id)
+        if member.status not in [ChatMember.ADMINISTRATOR, ChatMember.OWNER]:
+            if groups:  # یعنی قبلاً جای دیگه ثبت شده
+                try:
+                    await context.bot.ban_chat_member(chat_id, user_id)
+                    await context.bot.unban_chat_member(chat_id, user_id)
+                    await update.message.reply_text(
+                        f"⛔️ {user_name} نمی‌تواند همزمان در چند گروه عضو باشد. حذف شد!"
+                    )
+                except Exception as e:
+                    logging.error(f"خطا در ریموو کاربر {user_id}: {e}")
+                return
+            else:
+                add_user_group(user_id, chat_id)
+
+    # ✅ بررسی تریگرها
+    triggers = get_triggers(chat_id)
     for trigger, delay in triggers:
         if trigger.lower() in text.lower():
-            user_name = update.effective_user.full_name
-            group_name = update.effective_chat.title or "Private Chat"
-
             reply_text = (
                 f"👤 پلیر <b>{user_name}</b> به منطقه <b>{group_name}</b> وارد شد.\n\n"
                 f"⏱ مدت زمان سفر شما <b>{delay} ثانیه</b> می‌باشد."
