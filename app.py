@@ -22,109 +22,75 @@ logging.basicConfig(
 
 DB_FILE = "bot_settings.db"
 
-
 # ---------- دیتابیس ----------
 def init_db():
     with sqlite3.connect(DB_FILE) as conn:
         cursor = conn.cursor()
-        cursor.execute(
-            """CREATE TABLE IF NOT EXISTS triggers (
+        cursor.execute("""CREATE TABLE IF NOT EXISTS triggers (
                 chat_id INTEGER,
                 trigger TEXT,
                 delay INTEGER
-            )"""
-        )
-        cursor.execute(
-            """CREATE TABLE IF NOT EXISTS exits (
+            )""")
+        cursor.execute("""CREATE TABLE IF NOT EXISTS exits (
                 user_id INTEGER PRIMARY KEY
-            )"""
-        )
-        cursor.execute(
-            """CREATE TABLE IF NOT EXISTS memberships (
+            )""")
+        cursor.execute("""CREATE TABLE IF NOT EXISTS memberships (
                 user_id INTEGER,
                 chat_id INTEGER,
                 PRIMARY KEY (user_id, chat_id)
-            )"""
-        )
+            )""")
         conn.commit()
-
 
 init_db()
 
-
 def add_trigger(chat_id: int, trigger: str, delay: int):
     with sqlite3.connect(DB_FILE) as conn:
-        conn.execute(
-            "INSERT INTO triggers (chat_id, trigger, delay) VALUES (?, ?, ?)",
-            (chat_id, trigger, delay),
-        )
+        conn.execute("INSERT INTO triggers (chat_id, trigger, delay) VALUES (?, ?, ?)",
+                     (chat_id, trigger, delay))
         conn.commit()
-
 
 def get_triggers(chat_id: int):
     with sqlite3.connect(DB_FILE) as conn:
-        return conn.execute(
-            "SELECT trigger, delay FROM triggers WHERE chat_id = ?", (chat_id,)
-        ).fetchall()
-
+        return conn.execute("SELECT trigger, delay FROM triggers WHERE chat_id = ?", (chat_id,)).fetchall()
 
 def clear_triggers(chat_id: int):
     with sqlite3.connect(DB_FILE) as conn:
         conn.execute("DELETE FROM triggers WHERE chat_id = ?", (chat_id,))
         conn.commit()
 
-
 def add_exit(user_id: int):
     with sqlite3.connect(DB_FILE) as conn:
         conn.execute("INSERT OR REPLACE INTO exits (user_id) VALUES (?)", (user_id,))
         conn.commit()
 
-
 def has_exit(user_id: int) -> bool:
     with sqlite3.connect(DB_FILE) as conn:
-        return (
-            conn.execute("SELECT 1 FROM exits WHERE user_id = ?", (user_id,)).fetchone()
-            is not None
-        )
-
+        return conn.execute("SELECT 1 FROM exits WHERE user_id = ?", (user_id,)).fetchone() is not None
 
 def add_membership(user_id: int, chat_id: int):
     with sqlite3.connect(DB_FILE) as conn:
-        conn.execute(
-            "INSERT OR REPLACE INTO memberships (user_id, chat_id) VALUES (?, ?)",
-            (user_id, chat_id),
-        )
+        conn.execute("INSERT OR REPLACE INTO memberships (user_id, chat_id) VALUES (?, ?)",
+                     (user_id, chat_id))
         conn.commit()
-
 
 def get_memberships(user_id: int):
     with sqlite3.connect(DB_FILE) as conn:
-        return [
-            row[0]
-            for row in conn.execute(
-                "SELECT chat_id FROM memberships WHERE user_id = ?", (user_id,)
-            ).fetchall()
-        ]
-
+        return [row[0] for row in conn.execute(
+            "SELECT chat_id FROM memberships WHERE user_id = ?", (user_id,)
+        ).fetchall()]
 
 def remove_membership(user_id: int, chat_id: int):
     with sqlite3.connect(DB_FILE) as conn:
-        conn.execute(
-            "DELETE FROM memberships WHERE user_id = ? AND chat_id = ?",
-            (user_id, chat_id),
-        )
+        conn.execute("DELETE FROM memberships WHERE user_id = ? AND chat_id = ?",
+                     (user_id, chat_id))
         conn.commit()
-
 
 # ---------- هندلرها ----------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("✅ ربات روشنه و روی Render فعاله")
 
-
 async def set_trigger(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    member = await context.bot.get_chat_member(
-        update.effective_chat.id, update.effective_user.id
-    )
+    member = await context.bot.get_chat_member(update.effective_chat.id, update.effective_user.id)
     if member.status not in [ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.OWNER]:
         await update.message.reply_text("❌ فقط ادمین‌ها میتونن تریگر ثبت کنن")
         return
@@ -132,7 +98,6 @@ async def set_trigger(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if len(context.args) < 2:
         await update.message.reply_text("❌ استفاده: /set <کلمه> <زمان>")
         return
-
     trigger = context.args[0]
     try:
         delay = int(context.args[1])
@@ -141,10 +106,7 @@ async def set_trigger(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     add_trigger(update.effective_chat.id, trigger, delay)
-    await update.message.reply_text(
-        f"✅ تریگر «{trigger}» با تأخیر {delay} ثانیه ثبت شد."
-    )
-
+    await update.message.reply_text(f"✅ تریگر «{trigger}» با تأخیر {delay} ثانیه ثبت شد.")
 
 async def list_triggers(update: Update, context: ContextTypes.DEFAULT_TYPE):
     triggers = get_triggers(update.effective_chat.id)
@@ -157,11 +119,9 @@ async def list_triggers(update: Update, context: ContextTypes.DEFAULT_TYPE):
         msg += f"• {t} → {d} ثانیه\n"
     await update.message.reply_text(msg)
 
-
 async def clear_all(update: Update, context: ContextTypes.DEFAULT_TYPE):
     clear_triggers(update.effective_chat.id)
     await update.message.reply_text("🗑 تمام تریگرهای این گروه پاک شدند.")
-
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message or not update.message.text:
@@ -206,9 +166,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             async def delayed_reply(ctx: ContextTypes.DEFAULT_TYPE):
                 try:
-                    await ctx.bot.send_message(
-                        chat_id=chat_id,
-                        text=reply_text,
+                    await update.message.reply_text(
+                        reply_text,
                         parse_mode=ParseMode.HTML,
                         reply_to_message_id=update.message.message_id,
                     )
@@ -216,7 +175,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     logging.error(e)
 
             context.job_queue.run_once(delayed_reply, delay)
-
 
 # ---------- اجرای ربات روی Render ----------
 app = FastAPI()
@@ -226,24 +184,17 @@ application.add_handler(CommandHandler("start", start))
 application.add_handler(CommandHandler("set", set_trigger))
 application.add_handler(CommandHandler("list", list_triggers))
 application.add_handler(CommandHandler("clear", clear_all))
-application.add_handler(
-    MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message)
-)
-
+application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
 @app.on_event("startup")
 async def on_startup():
     await application.initialize()
-    await application.start()
-    await application.updater.start()  # ✅ برای job_queue
-
+    logging.info("🚀 Bot initialized. Waiting for webhook events...")
 
 @app.on_event("shutdown")
 async def on_shutdown():
-    await application.updater.stop()
     await application.stop()
     await application.shutdown()
-
 
 @app.post(f"/webhook/{BOT_TOKEN}")
 async def telegram_webhook(request: Request):
@@ -252,11 +203,9 @@ async def telegram_webhook(request: Request):
     await application.process_update(update)
     return Response(status_code=200)
 
-
 @app.get("/health")
 def health():
     return {"ok": True}
-
 
 @app.get("/set-webhook")
 async def set_webhook(request: Request):
