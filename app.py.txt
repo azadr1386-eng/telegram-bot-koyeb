@@ -1,0 +1,150 @@
+import os
+import logging
+import sqlite3
+from fastapi import FastAPI, Request, Response
+from telegram import Update
+from telegram.constants import ParseMode
+from telegram.ext import (
+    Application,
+    CommandHandler,
+    MessageHandler,
+    ContextTypes,
+    filters,
+)
+
+# ================== تنظیمات اولیه
+BOT_TOKEN = os.environ["BOT_TOKEN"]  # توکن از Environment Variable خوانده می‌شود
+WEBHOOK_PATH = f"/webhook/{BOT_TOKEN}"
+
+logging.basicConfig(
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
+)
+
+# ================== دیتابیس ساده برای ذخیره تریگرها
+DB_FILE = "bot_settings.db"
+
+def init_db():
+    with sqlite3.connect(DB_FILE) as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS triggers (
+                chat_id INTEGER,
+                trigger TEXT,
+                delay INTEGER
+            )
+            """
+        )
+        conn.commit()
+
+init_db()
+
+def add_trigger(chat_id: int, trigger: str, delay: int):
+    with sqlite3.connect(DB_FILE) as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "INSERT INTO triggers (chat_id, trigger, delay) VALUES (?, ?, ?)",
+            (chat_id, trigger, delay),
+        )
+        conn.commit()
+
+def get_triggers(chat_id: int):
+    with sqlite3.connect(DB_FILE) as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT trigger, delay FROM triggers WHERE chat_id = ?", (chat_id,))
+        return cursor.fetchall()
+
+def clear_triggers(chat_id: int):
+    with sqlite3.connect(DB_FILE) as conn:
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM triggers WHERE chat_id = ?", (chat_id,))
+        conn.commit()
+
+# ================== هندلرها
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("سلام 👋 من روشنم و روی وبهوک کار می‌کنم ✅")
+
+async def set_trigger(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if len(context.args) < 2:
+        await update.message.reply_text("❌ استفاده درست: /set <کلمه> <تأخیر بر حسب ثانیه>")
+        return
+    trigger = context.args[0]
+    try:
+        delay = int(context.args[1])
+    except ValueError:
+        await update.message.reply_text("⏱ لطفاً زمان را به عدد صحیح وارد کنید.")
+        return
+
+    add_trigger(update.effective_chat.id, trigger, delay)
+    await update.message.reply_text(
+        f"✅ تریگر «{trigger}» با تأخیر {delay} ثانیه ثبت شد."
+    )
+
+async def clear_all(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    clear_triggers(update.effective_chat.id)
+    await update.message.reply_text("🗑 تمام تریگرهای این گروه پاک شدند.")
+
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.message or not update.message.text:
+        return
+
+    chat_id = update.effective_chat.id
+    triggers = get_triggers(chat_id)
+    text = update.message.text
+
+    for trigger, delay in triggers:
+        if trigger.lower() in text.lower():
+            user_name = update.effective_user.full_name
+            group_name = update.effective_chat.title or "Private Chat"
+
+            reply_text = (
+                f"👤 پلیر <b>{user_name}</b> به منطقه <b>{group_name}</b> وارد شد.\n\n"
+                f"⏱ مدت زمان سفر شما <b>{delay} ثانیه</b> می‌باشد."
+            )
+
+            async def delayed_reply(ctx: ContextTypes.DEFAULT_TYPE):
+                await update.message.reply_text(
+                    reply_text,
+                    parse_mode=ParseMode.HTML,
+                    reply_to_message_id=update.message.message_id,
+                )
+
+            context.job_queue.run_once(delayed_reply, delay)
+
+# ================== اپ تلگرام
+application = Application.builder().token(BOT_TOKEN).build()
+
+application.add_handler(CommandHandler("start", start))
+application.add_handler(CommandHandler("set", set_trigger))
+application.add_handler(CommandHandler("clear", clear_all))
+application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+
+# ================== اپ FastAPI
+app = FastAPI()
+
+@app.on_event("startup")
+async def on_startup():
+    await application.initialize()
+    await application.start()
+
+@app.on_event("shutdown")
+async def on_shutdown():
+    await application.stop()
+    await application.shutdown()
+
+@app.post(WEBHOOK_PATH)
+async def telegram_webhook(request: Request):
+    data = await request.json()
+    update = Update.de_json(data, application.bot)
+    await application.process_update(update)
+    return Response(status_code=200)
+
+@app.get("/health")
+def health():
+    return {"ok": True}
+
+@app.get("/set-webhook")
+async def set_webhook(request: Request):
+    base_url = str(request.base_url).rstrip("/")
+    await application.bot.set_webhook(url=f"{base_url}{WEBHOOK_PATH}")
+    return {"status": "set", "webhook": f"{base_url}{WEBHOOK_PATH}"}
