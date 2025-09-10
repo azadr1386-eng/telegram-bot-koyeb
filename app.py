@@ -2,9 +2,8 @@ import os
 import logging
 import sqlite3
 import asyncio
-import json
 from fastapi import FastAPI, Request, Response
-from telegram import Update, MessageEntity
+from telegram import Update
 from telegram.constants import ChatMemberStatus
 from telegram.ext import (
     Application,
@@ -32,8 +31,7 @@ def init_db():
                 chat_id INTEGER,
                 trigger TEXT,
                 delay INTEGER,
-                message TEXT,
-                entities TEXT
+                message TEXT
             )""")
         cursor.execute("""CREATE TABLE IF NOT EXISTS memberships (
                 user_id INTEGER,
@@ -44,18 +42,18 @@ def init_db():
 
 init_db()
 
-def add_trigger(chat_id: int, trigger: str, delay: int, message: str, entities: str = None):
+def add_trigger(chat_id: int, trigger: str, delay: int, message: str):
     with sqlite3.connect(DB_FILE) as conn:
         conn.execute(
-            "INSERT INTO triggers (chat_id, trigger, delay, message, entities) VALUES (?, ?, ?, ?, ?)",
-            (chat_id, trigger, delay, message, entities),
+            "INSERT INTO triggers (chat_id, trigger, delay, message) VALUES (?, ?, ?, ?)",
+            (chat_id, trigger, delay, message),
         )
         conn.commit()
 
 def get_triggers(chat_id: int):
     with sqlite3.connect(DB_FILE) as conn:
         return conn.execute(
-            "SELECT trigger, delay, message, entities FROM triggers WHERE chat_id = ?", (chat_id,)
+            "SELECT trigger, delay, message FROM triggers WHERE chat_id = ?", (chat_id,)
         ).fetchall()
 
 def clear_triggers(chat_id: int):
@@ -113,15 +111,11 @@ async def set_trigger(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     message = " ".join(context.args[2:])
 
-    # ذخیره entities به صورت JSON
-    entities_json = None
-    if update.message.entities:
-        entities_json = json.dumps([e.to_dict() for e in update.message.entities])
-
-    add_trigger(update.effective_chat.id, trigger, delay, message, entities_json)
+    add_trigger(update.effective_chat.id, trigger, delay, message)
     await update.message.reply_text(
         f"✅ تریگر «{trigger}» با تأخیر {delay} ثانیه ثبت شد.\n"
-        f"📩 پیام ذخیره‌شده: {message}"
+        f"📩 پیام ذخیره‌شده: {message}",
+        parse_mode="HTML",
     )
 
 async def list_triggers(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -131,9 +125,9 @@ async def list_triggers(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     msg = "📋 تریگرهای این گروه:\n\n"
-    for t, d, m, _ in triggers:
+    for t, d, m in triggers:
         msg += f"• {t} → {d} ثانیه → «{m}»\n"
-    await update.message.reply_text(msg)
+    await update.message.reply_text(msg, parse_mode="HTML")
 
 async def clear_all(update: Update, context: ContextTypes.DEFAULT_TYPE):
     clear_triggers(update.effective_chat.id)
@@ -159,7 +153,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # بررسی تریگرها
     triggers = get_triggers(chat_id)
-    for trigger, delay, message, entities_json in triggers:
+    for trigger, delay, message in triggers:
         if trigger.lower() in text.lower():
             # پیام فوری
             info_text = (
@@ -193,14 +187,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             async def delayed_reply():
                 try:
                     await asyncio.sleep(delay)
-                    entities = None
-                    if entities_json:
-                        entities_list = json.loads(entities_json)
-                        entities = [MessageEntity.from_dict(e) for e in entities_list]
-
                     await update.message.reply_text(
                         message,
-                        entities=entities,
+                        parse_mode="HTML",
                         reply_to_message_id=update.message.message_id,
                     )
                 except Exception as e:
