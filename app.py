@@ -108,12 +108,11 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("✅ ربات روشنه و فعاله")
 
 async def set_trigger_normal(update: Update, context: ContextTypes.DEFAULT_TYPE):
-try:
+    try:
         member = await context.bot.get_chat_member(update.effective_chat.id, update.effective_user.id)
         if member.status not in [ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.OWNER]:
             await update.message.reply_text("❌ فقط ادمین‌ها میتونن تریگر ثبت کنن")
-
-return
+            return
 
         if len(context.args) < 3:
             await update.message.reply_text("❌ استفاده: /set <کلمه> <زمان> <پیام>")
@@ -170,7 +169,7 @@ async def set_trigger_unquarantine(update: Update, context: ContextTypes.DEFAULT
     try:
         member = await context.bot.get_chat_member(update.effective_chat.id, update.effective_user.id)
         if member.status not in [ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.OWNER]:
-            await update.message.reply_text("❌ فقط ادمین‌ها میتونن تریگر ثبت کنن")
+            await update.message.reply_text("❌ فقط ادم��ن‌ها میتونن تریگر ثبت کنن")
             return
 
         if len(context.args) < 2:
@@ -199,7 +198,7 @@ async def list_triggers(update: Update, context: ContextTypes.DEFAULT_TYPE):
         msg = "📋 تریگرهای این گروه:\n\n"
         for t, d, m, type_, related_t_word in triggers:
             if type_ == 'ban':
-msg += f"🚫 قرنطینه: {t} (خروج: {related_t_word}) → {d} ثانیه → «{m}»\n"
+                msg += f"🚫 قرنطینه: {t} (خروج: {related_t_word}) → {d} ثانیه → «{m}»\n"
             elif type_ == 'unban':
                 msg += f"✅ خروج: {t} → «{m}»\n"
             else:
@@ -212,8 +211,7 @@ msg += f"🚫 قرنطینه: {t} (خروج: {related_t_word}) → {d} ثانی�
 async def clear_all(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         clear_triggers(update.effective_chat.id)
-
-await update.message.reply_text("🗑 تمام تریگرهای این گروه پاک شدند.")
+        await update.message.reply_text("🗑 تمام تریگرهای این گروه پاک شدند.")
     except Exception as e:
         logging.error(f"خطا در clear_all: {e}")
 
@@ -276,15 +274,15 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
                     info_text = f"👤 پلیر <b>{user_name}</b> به منطقه <b>{group_name}</b> وارد شد و به دلیل فعال کردن تریگر <b>«{trigger_word}»</b> به قرنطینه منتقل شد.\n\n⏱ مدت زمان سفر شما <b>{delay} ثانیه</b> می‌باشد تا به پیام اصلی برسید."
                     await update.message.reply_text(info_text, parse_mode="HTML", reply_to_message_id=update.message.message_id)
-# حذف کاربر از سایر گروه‌ها
+
+                    # حذف کاربر از سایر گروه‌ها
                     user_memberships_info = get_user_memberships_with_status(user_id)
                     for member_chat_id, _, _, _ in user_memberships_info:
                         if member_chat_id != chat_id:
                             try:
                                 bot_member = await context.bot.get_chat_member(member_chat_id, context.bot.id)
                                 if bot_member.status in [ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.OWNER]:
-
-await context.bot.ban_chat_member(member_chat_id, user_id)
+                                    await context.bot.ban_chat_member(member_chat_id, user_id)
                                     await context.bot.unban_chat_member(member_chat_id, user_id)
                                     remove_membership(user_id, member_chat_id)
                                     logging.info(f"✅ کاربر {user_name} از گروه {member_chat_id} حذف شد.")
@@ -355,6 +353,7 @@ async def telegram_webhook(request: Request):
 @app.get("/health")
 def health():
     return {"ok": True}
+
 @app.get("/set-webhook")
 async def set_webhook(request: Request):
     try:
