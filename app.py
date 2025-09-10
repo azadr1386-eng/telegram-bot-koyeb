@@ -235,7 +235,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ---------- اجرای ربات روی Render ----------
 app = FastAPI()
-application = Application.builder().token(BOT_TOKEN).build()
+application = (
+    Application.builder()
+    .token(BOT_TOKEN)
+    .updater(None)   # 👈 مهم برای حالت وبهوک
+    .build()
+)
 
 application.add_handler(CommandHandler("start", start))
 application.add_handler(CommandHandler("set", set_trigger))
