@@ -104,6 +104,207 @@ def set_user_quarantine_status(user_id: int, is_quarantined: bool, quarantined_i
 
 def get_user_global_quarantine_status(user_id: int):
     with sqlite3.connect(DB_FILE) as conn:
+type_emoji = "✨"
+        if type_ == 'ban':
+            type_emoji = "🚫"
+            if related_t_word:
+                msg += f"{type_emoji} قرنطینه: {t} (خروج: {related_t_word}) → {d} ثانیه → «{m}»\n"
+                continue
+        elif type_ == 'unban':
+            type_emoji = "✅"
+        msg += f"{type_emoji} {t} (نوع: {type_}) → {d} ثانیه → «{m}»\n"
+    await update.message.reply_text(msg, parse_mode="HTML")
+
+async def clear_all(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    clear_triggers(update.effective_chat.id)
+    await update.message.reply_text("🗑 تمام تریگرهای این گروه پاک شدند.")
+
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.message or not update.message.text:
+        return
+
+    text = update.message.text
+    user_id = update.effective_user.id
+    user_name = update.effective_user.full_name
+    chat_id = update.effective_chat.id
+    group_name = update.effective_chat.title or "Private"
+
+    # --- Step 1: Check user's global quarantine status ---
+    is_quarantined, quarantined_in_chat_id, awaiting_unban_trigger = get_user_global_quarantine_status(user_id)
+
+    if is_quarantined:
+        # User is in quarantine. Check if they sent the unquarantine trigger.
+        if awaiting_unban_trigger and awaiting_unban_trigger.lower() in text.lower():
+            # User sent the correct unquarantine trigger
+            set_user_quarantine_status(user_id, False) # Global unquarantine
+            logging.info(f"🔓 کاربر {user_name} با تریگر '{awaiting_unban_trigger}' از قرنطینه خارج شد.")
+            await update.message.reply_text(f"🎉 شما با موفقیت از وضعیت قرنطینه خارج شدید!", reply_to_message_id=update.message.message_id)
+
+            # Send the unquarantine message if defined for this chat
+            unban_triggers_in_chat = [m for t, _, m, type_, _ in get_triggers(chat_id) if type_ == 'unban' and t.lower() == awaiting_unban_trigger.lower()]
+            if unban_triggers_in_chat:
+                await update.message.reply_text(unban_triggers_in_chat[0], parse_mode="HTML")
+
+            return # Stop further processing, quarantine lifted.
+        else:
+            # User is quarantined and sent a message, but it's NOT the unquarantine trigger.
+            # If they are not in the chat where they were quarantined, remove them from THIS group.
+            if chat_id != quarantined_in_chat_id:
+                logging.info(f"🚫 کاربر {user_name} در وضعیت قرنطینه است و در گروه {group_name} پیام فرستاد (که گروه قرنطینه نیست).")
+                try:
+                    # Remove from this group to enforce quarantine
+                    await context.bot.ban_chat_member(chat_id, user_id)
+                    await context.bot.unban_chat_member(chat_id, user_id) # Allow manual re-entry later
+                    remove_membership(user_id, chat_id) # Also update our local membership
+                    await update.message.reply_text(
+                        f"⛔ شما در وضعیت قرنطینه هستید و اجازه فعالیت در این گروه را ندارید تا زمانی که تریگر خروج را بزنید: <b>{awaiting_unban_trigger}</b>",
+                        parse_mode="HTML"
+                    )
+                    logging.info(f"✅ کاربر {user_name} به دلیل قرنطینه از گروه {group_name} حذف شد.")
+                    return # Stop further processing for quarantined users trying to bypass.
+                except Exception as e:
+                    logging.error(f"❌ خطا در حذف کاربر قرنطینه {user_name} از {group_name}: {e}")
+            else:
+                # User is quarantined and sent a message in the *quarantine* chat, but not the unquarantine trigger.
+                # Allow them to continue messaging in the quarantine chat, as they need to send the unquarantine trigger there.
+                logging.info(f"💬 کاربر {user_name} در گروه قرنطینه پیام داد اما تریگر خروج نبود.")
+                await update.message.reply_text(
+                    f"⚠️ شما در قرنطینه هستید. برای خروج، تریگر <b>{awaiting_unban_trigger}</b> را ارسال کنید.",
+                    parse_mode="HTML"
+                )
+info_text = (
+                    f"👤 پلیر <b>{user_name}</b> به منطقه <b>{group_name}</b> وارد شد.\n\n"
+                    f"⏱ مدت زمان سفر شما <b>{delay} ثانیه</b> می‌باشد."
+                )
+                await update.message.reply_text(
+                    info_text,
+                    parse_mode="HTML",
+                    reply_to_message_id=update.message.message_id,
+                )
+
+                async def delayed_reply_normal():
+                    try:
+                        await asyncio.sleep(delay)
+                        await update.message.reply_text(
+                            message,
+                            parse_mode="HTML",
+                            reply_to_message_id=update.message.message_id,
+                        )
+                    except Exception as e:
+                        logging.error(e)
+
+                # اصلاح این خط - استفاده از asyncio.create_task به جای context.application.create_task
+                asyncio.create_task(delayed_reply_normal())
+                return # Stop processing further triggers for this message.
+
+            # 'unban' type triggers are handled at the beginning of handle_message if the user is already quarantined.
+            # If a user is not quarantined, and accidentally types an unquarantine trigger, it won't do anything here.
+
+# ---------- اجرای ربات ----------
+app = FastAPI()
+application = Application.builder().token(BOT_TOKEN).build()
+
+application.add_handler(CommandHandler("start", start))
+application.add_handler(CommandHandler("set", set_trigger_normal))
+application.add_handler(CommandHandler("setquarantine", set_trigger_quarantine))
+application.add_handler(CommandHandler("setunquarantine", set_trigger_unquarantine))
+application.add_handler(CommandHandler("list", list_triggers))
+application.add_handler(CommandHandler("clear", clear_all))
+application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+
+@app.on_event("startup")
+async def on_startup():
+    await application.initialize()
+    await application.start()
+    logging.info("🚀 Bot initialized. Waiting for webhook events...")
+
+@app.on_event("shutdown")
+async def on_shutdown():
+    await application.stop()
+    await application.shutdown()
+
+@app.post(f"/webhook/{BOT_TOKEN}")
+async def telegram_webhook(request: Request):
+    data = await request.json()
+    update = Update.de_json(data, application.bot)
+    await application.process_update(update)
+    return Response(status_code=200)
+
+@app.get("/health")
+def health():
+    return {"ok": True}
+
+@app.get("/set-webhook")
+async def set_webhook(request: Request):
+    base_url = str(request.base_url).rstrip("/")
+    await application.bot.set_webhook(url=f"{base_url}/webhook/{BOT_TOKEN}")
+    return {"status": "set", "webhook": f"{base_url}/webhook/{BOT_TOKEN}"}
+return # Prevent other triggers from firing if the user is in quarantine.
+
+    # --- Step 2: Process normal messages and initiate quarantine if not already quarantined ---
+
+    # ثبت عضویت در گروه
+    add_membership(user_id, chat_id)
+
+    # بررسی تریگرها
+    triggers = get_triggers(chat_id)
+    for trigger_word, delay, message, type_, related_trigger_word in triggers:
+        if trigger_word.lower() in text.lower():
+            if type_ == 'ban': # This is the quarantine trigger (e.g., #ورود)
+                logging.info(f"🚨 تریگر قرنطینه '{trigger_word}' توسط {user_name} در گروه {group_name} فعال شد.")
+                # Set user's global quarantine status
+                set_user_quarantine_status(user_id, True, chat_id, related_trigger_word)
+
+                # Send immediate info message
+                info_text = (
+                    f"👤 پلیر <b>{user_name}</b> به منطقه <b>{group_name}</b> وارد شد و به دلیل فعال کردن تریگر <b>«{trigger_word}»</b> به قرنطینه منتقل شد.\n\n"
+                    f"⏱ مدت زمان سفر شما <b>{delay} ثانیه</b> می‌باشد تا به پیام اصلی برسید."
+                )
+                await update.message.reply_text(
+                    info_text,
+                    parse_mode="HTML",
+                    reply_to_message_id=update.message.message_id,
+                )
+
+                # Remove user from all other groups where the bot is admin
+                user_memberships_info = get_user_memberships_with_status(user_id) # Get all memberships, including their quarantine status
+                for member_chat_id, _, _, _ in user_memberships_info:
+                    if member_chat_id != chat_id: # If it's not the current (quarantine) chat
+                        try:
+                            bot_member = await context.bot.get_chat_member(member_chat_id, context.bot.id)
+                            if bot_member.status in [ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.OWNER]:
+                                await context.bot.ban_chat_member(member_chat_id, user_id)
+                                await context.bot.unban_chat_member(member_chat_id, user_id)
+                                remove_membership(user_id, member_chat_id) # Also remove from our membership tracking
+                                logging.info(f"✅ کاربر {user_name} از گروه {member_chat_id} (که خارج از قرنطینه است) حذف شد.")
+                            else:
+                                logging.warning(f"⚠️ بات توی گروه {member_chat_id} ادمین نیست، نمی‌تونه {user_name} رو حذف کنه.")
+                        except Exception as e:
+                            logging.error(f"❌ خطا در حذف {user_name} از {member_chat_id}: {e}")
+
+                # Final message after delay in the quarantine chat
+                async def delayed_reply_quarantine():
+                    try:
+                        await asyncio.sleep(delay)
+                        await update.message.reply_text(
+                            message, # This is the quarantine_message
+                            parse_mode="HTML",
+                            reply_to_message_id=update.message.message_id,
+                        )
+                        await update.message.reply_text(
+                            f"برای خروج از قرنطینه، لطفاً تریگر <b>«{related_trigger_word}»</b> را ارسال کنید.",
+                            parse_mode="HTML"
+                        )
+                    except Exception as e:
+                        logging.error(e)
+
+                # اصلاح این خط - استفاده از asyncio.create_task به جای context.application.create_task
+                asyncio.create_task(delayed_reply_quarantine())
+                return # Stop processing further triggers for this message, quarantine initiated.
+
+            elif type_ == 'normal':
+                # Original normal trigger behavior
+                logging.info(f"✨ تریگر عادی '{trigger_word}' توسط {user_name} فعال شد.")
 # Find if user is quarantined in *any* chat
         result = conn.execute(
             "SELECT is_quarantined, quarantined_in_chat_id, awaiting_unban_trigger FROM memberships WHERE user_id = ? AND is_quarantined = 1 LIMIT 1",
@@ -205,201 +406,3 @@ async def list_triggers(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     msg = "📋 تریگرهای این گروه:\n\n"
     for t, d, m, type_, related_t_word in triggers:
-return # Prevent other triggers from firing if the user is in quarantine.
-
-    # --- Step 2: Process normal messages and initiate quarantine if not already quarantined ---
-
-    # ثبت عضویت در گروه
-    add_membership(user_id, chat_id)
-
-    # بررسی تریگرها
-    triggers = get_triggers(chat_id)
-    for trigger_word, delay, message, type_, related_trigger_word in triggers:
-        if trigger_word.lower() in text.lower():
-            if type_ == 'ban': # This is the quarantine trigger (e.g., #ورود)
-                logging.info(f"🚨 تریگر قرنطینه '{trigger_word}' توسط {user_name} در گروه {group_name} فعال شد.")
-                # Set user's global quarantine status
-                set_user_quarantine_status(user_id, True, chat_id, related_trigger_word)
-
-                # Send immediate info message
-                info_text = (
-                    f"👤 پلیر <b>{user_name}</b> به منطقه <b>{group_name}</b> وارد شد و به دلیل فعال کردن تریگر <b>«{trigger_word}»</b> به قرنطینه منتقل شد.\n\n"
-                    f"⏱ مدت زمان سفر شما <b>{delay} ثانیه</b> می‌باشد تا به پیام اصلی برسید."
-                )
-                await update.message.reply_text(
-                    info_text,
-                    parse_mode="HTML",
-                    reply_to_message_id=update.message.message_id,
-                )
-
-                # Remove user from all other groups where the bot is admin
-                user_memberships_info = get_user_memberships_with_status(user_id) # Get all memberships, including their quarantine status
-                for member_chat_id, _, _, _ in user_memberships_info:
-                    if member_chat_id != chat_id: # If it's not the current (quarantine) chat
-                        try:
-                            bot_member = await context.bot.get_chat_member(member_chat_id, context.bot.id)
-                            if bot_member.status in [ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.OWNER]:
-                                await context.bot.ban_chat_member(member_chat_id, user_id)
-                                await context.bot.unban_chat_member(member_chat_id, user_id)
-                                remove_membership(user_id, member_chat_id) # Also remove from our membership tracking
-                                logging.info(f"✅ کاربر {user_name} از گروه {member_chat_id} (که خارج از قرنطینه است) حذف شد.")
-                            else:
-                                logging.warning(f"⚠️ بات توی گروه {member_chat_id} ادمین نیست، نمی‌تونه {user_name} رو حذف کنه.")
-                        except Exception as e:
-                            logging.error(f"❌ خطا در حذف {user_name} از {member_chat_id}: {e}")
-
-                # Final message after delay in the quarantine chat
-                async def delayed_reply_quarantine():
-                    try:
-                        await asyncio.sleep(delay)
-                        await update.message.reply_text(
-                            message, # This is the quarantine_message
-                            parse_mode="HTML",
-                            reply_to_message_id=update.message.message_id,
-                        )
-                        await update.message.reply_text(
-                            f"برای خروج از قرنطینه، لطفاً تریگر <b>«{related_trigger_word}»</b> را ارسال کنید.",
-                            parse_mode="HTML"
-                        )
-                    except Exception as e:
-                        logging.error(e)
-
-                context.application.create_task(delayed_reply_quarantine())
-                return # Stop processing further triggers for this message, quarantine initiated.
-
-            elif type_ == 'normal':
-                # Original normal trigger behavior
-                logging.info(f"✨ تریگر عادی '{trigger_word}' توسط {user_name} فعال شد.")
-                info_text = (
-                    f"👤 پلیر <b>{user_name}</b> به منطقه <b>{group_name}</b> وارد شد.\n\n"
-                    f"⏱ مدت زمان سفر شما <b>{delay} ثانیه</b> می‌باشد."
-                )
-await update.message.reply_text(
-                    info_text,
-                    parse_mode="HTML",
-                    reply_to_message_id=update.message.message_id,
-                )
-
-                async def delayed_reply_normal():
-                    try:
-                        await asyncio.sleep(delay)
-                        await update.message.reply_text(
-                            message,
-                            parse_mode="HTML",
-                            reply_to_message_id=update.message.message_id,
-                        )
-                    except Exception as e:
-                        logging.error(e)
-
-                context.application.create_task(delayed_reply_normal())
-                return # Stop processing further triggers for this message.
-
-            # 'unban' type triggers are handled at the beginning of handle_message if the user is already quarantined.
-            # If a user is not quarantined, and accidentally types an unquarantine trigger, it won't do anything here.
-
-# ---------- اجرای ربات ----------
-app = FastAPI()
-application = Application.builder().token(BOT_TOKEN).build()
-
-application.add_handler(CommandHandler("start", start))
-application.add_handler(CommandHandler("set", set_trigger_normal)) # Changed name for clarity
-application.add_handler(CommandHandler("setquarantine", set_trigger_quarantine)) # New command for #ورود
-application.add_handler(CommandHandler("setunquarantine", set_trigger_unquarantine)) # New command for #خروج
-application.add_handler(CommandHandler("list", list_triggers))
-application.add_handler(CommandHandler("clear", clear_all))
-application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-
-@app.on_event("startup")
-async def on_startup():
-    await application.initialize()
-    logging.info("🚀 Bot initialized. Waiting for webhook events...")
-
-@app.on_event("shutdown")
-async def on_shutdown():
-    await application.stop()
-    await application.shutdown()
-
-@app.post(f"/webhook/{BOT_TOKEN}")
-async def telegram_webhook(request: Request):
-    data = await request.json()
-    update = Update.de_json(data, application.bot)
-    await application.process_update(update)
-    return Response(status_code=200)
-
-@app.get("/health")
-def health():
-    return {"ok": True}
-
-@app.get("/set-webhook")
-async def set_webhook(request: Request):
-    base_url = str(request.base_url).rstrip("/")
-    await application.bot.set_webhook(url=f"{base_url}/webhook/{BOT_TOKEN}")
-    return {"status": "set", "webhook": f"{base_url}/webhook/{BOT_TOKEN}"}
-type_emoji = "✨"
-        if type_ == 'ban':
-            type_emoji = "🚫"
-            if related_t_word:
-                msg += f"{type_emoji} قرنطینه: {t} (خروج: {related_t_word}) → {d} ثانیه → «{m}»\n"
-                continue
-        elif type_ == 'unban':
-            type_emoji = "✅"
-        msg += f"{type_emoji} {t} (نوع: {type_}) → {d} ثانیه → «{m}»\n"
-    await update.message.reply_text(msg, parse_mode="HTML")
-
-async def clear_all(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    clear_triggers(update.effective_chat.id)
-    await update.message.reply_text("🗑 تمام تریگرهای این گروه پاک شدند.")
-
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not update.message or not update.message.text:
-        return
-
-    text = update.message.text
-    user_id = update.effective_user.id
-    user_name = update.effective_user.full_name
-    chat_id = update.effective_chat.id
-    group_name = update.effective_chat.title or "Private"
-
-    # --- Step 1: Check user's global quarantine status ---
-    is_quarantined, quarantined_in_chat_id, awaiting_unban_trigger = get_user_global_quarantine_status(user_id)
-
-    if is_quarantined:
-        # User is in quarantine. Check if they sent the unquarantine trigger.
-        if awaiting_unban_trigger and awaiting_unban_trigger.lower() in text.lower():
-            # User sent the correct unquarantine trigger
-            set_user_quarantine_status(user_id, False) # Global unquarantine
-            logging.info(f"🔓 کاربر {user_name} با تریگر '{awaiting_unban_trigger}' از قرنطینه خارج شد.")
-            await update.message.reply_text(f"🎉 شما با موفقیت از وضعیت قرنطینه خارج شدید!", reply_to_message_id=update.message.message_id)
-
-            # Send the unquarantine message if defined for this chat
-            unban_triggers_in_chat = [m for t, _, m, type_, _ in get_triggers(chat_id) if type_ == 'unban' and t.lower() == awaiting_unban_trigger.lower()]
-            if unban_triggers_in_chat:
-                await update.message.reply_text(unban_triggers_in_chat[0], parse_mode="HTML")
-
-            return # Stop further processing, quarantine lifted.
-        else:
-            # User is quarantined and sent a message, but it's NOT the unquarantine trigger.
-            # If they are not in the chat where they were quarantined, remove them from THIS group.
-            if chat_id != quarantined_in_chat_id:
-                logging.info(f"🚫 کاربر {user_name} در وضعیت قرنطینه است و در گروه {group_name} پیام فرستاد (که گروه قرنطینه نیست).")
-                try:
-                    # Remove from this group to enforce quarantine
-                    await context.bot.ban_chat_member(chat_id, user_id)
-                    await context.bot.unban_chat_member(chat_id, user_id) # Allow manual re-entry later
-                    remove_membership(user_id, chat_id) # Also update our local membership
-                    await update.message.reply_text(
-                        f"⛔ شما در وضعیت قرنطینه هستید و اجازه فعالیت در این گروه را ندارید تا زمانی که تریگر خروج را بزنید: <b>{awaiting_unban_trigger}</b>",
-                        parse_mode="HTML"
-                    )
-                    logging.info(f"✅ کاربر {user_name} به دلیل قرنطینه از گروه {group_name} حذف شد.")
-                    return # Stop further processing for quarantined users trying to bypass.
-                except Exception as e:
-                    logging.error(f"❌ خطا در حذف کاربر قرنطینه {user_name} از {group_name}: {e}")
-            else:
-                # User is quarantined and sent a message in the *quarantine* chat, but not the unquarantine trigger.
-                # Allow them to continue messaging in the quarantine chat, as they need to send the unquarantine trigger there.
-                logging.info(f"💬 کاربر {user_name} در گروه قرنطینه پیام داد اما تریگر خروج نبود.")
-                await update.message.reply_text(
-                    f"⚠️ شما در قرنطینه هستید. برای خروج، تریگر <b>{awaiting_unban_trigger}</b> را ارسال کنید.",
-                    parse_mode="HTML"
-                )
