@@ -1,6 +1,7 @@
 import os
 import logging
 import sqlite3
+import asyncio
 from fastapi import FastAPI, Request, Response
 from telegram import Update
 from telegram.constants import ParseMode, ChatMemberStatus
@@ -164,8 +165,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"⏱ مدت زمان سفر شما <b>{delay} ثانیه</b> می‌باشد."
             )
 
-            async def delayed_reply(ctx: ContextTypes.DEFAULT_TYPE):
+            async def delayed_reply():
                 try:
+                    await asyncio.sleep(delay)
                     await update.message.reply_text(
                         reply_text,
                         parse_mode=ParseMode.HTML,
@@ -174,7 +176,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 except Exception as e:
                     logging.error(e)
 
-            context.job_queue.run_once(delayed_reply, delay)
+            asyncio.create_task(delayed_reply())
 
 # ---------- اجرای ربات روی Render ----------
 app = FastAPI()
