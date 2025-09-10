@@ -137,7 +137,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # خروج
     if "#خروج" in text:
         add_exit(user_id)
-        await update.message.reply_text(f"👋 {user_name} از محدودیت خارج شد.")
+        await update.message.reply_text(f"👋 سفر به سلامت {user_name}")
         return
 
     # مدیریت گروه‌ها
