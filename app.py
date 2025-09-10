@@ -2,6 +2,7 @@ import os
 import logging
 import sqlite3
 import asyncio
+import json
 from fastapi import FastAPI, Request, Response
 from telegram import Update
 from telegram.constants import ParseMode, ChatMemberStatus
@@ -31,10 +32,8 @@ def init_db():
                 chat_id INTEGER,
                 trigger TEXT,
                 delay INTEGER,
-                message TEXT
-            )""")
-        cursor.execute("""CREATE TABLE IF NOT EXISTS exits (
-                user_id INTEGER PRIMARY KEY
+                message TEXT,
+                entities TEXT
             )""")
         cursor.execute("""CREATE TABLE IF NOT EXISTS memberships (
                 user_id INTEGER,
@@ -45,40 +44,24 @@ def init_db():
 
 init_db()
 
-def add_trigger(chat_id: int, trigger: str, delay: int, message: str):
+def add_trigger(chat_id: int, trigger: str, delay: int, message: str, entities):
     with sqlite3.connect(DB_FILE) as conn:
         conn.execute(
-            "INSERT INTO triggers (chat_id, trigger, delay, message) VALUES (?, ?, ?, ?)",
-            (chat_id, trigger, delay, message),
+            "INSERT INTO triggers (chat_id, trigger, delay, message, entities) VALUES (?, ?, ?, ?, ?)",
+            (chat_id, trigger, delay, message, json.dumps(entities) if entities else None),
         )
         conn.commit()
 
 def get_triggers(chat_id: int):
     with sqlite3.connect(DB_FILE) as conn:
         return conn.execute(
-            "SELECT trigger, delay, message FROM triggers WHERE chat_id = ?", (chat_id,)
+            "SELECT trigger, delay, message, entities FROM triggers WHERE chat_id = ?", (chat_id,)
         ).fetchall()
 
 def clear_triggers(chat_id: int):
     with sqlite3.connect(DB_FILE) as conn:
         conn.execute("DELETE FROM triggers WHERE chat_id = ?", (chat_id,))
         conn.commit()
-
-def add_exit(user_id: int):
-    with sqlite3.connect(DB_FILE) as conn:
-        conn.execute("INSERT OR REPLACE INTO exits (user_id) VALUES (?)", (user_id,))
-        conn.commit()
-
-def remove_exit(user_id: int):
-    with sqlite3.connect(DB_FILE) as conn:
-        conn.execute("DELETE FROM exits WHERE user_id = ?", (user_id,))
-        conn.commit()
-
-def has_exit(user_id: int) -> bool:
-    with sqlite3.connect(DB_FILE) as conn:
-        return conn.execute(
-            "SELECT 1 FROM exits WHERE user_id = ?", (user_id,)
-        ).fetchone() is not None
 
 def add_membership(user_id: int, chat_id: int):
     with sqlite3.connect(DB_FILE) as conn:
@@ -117,8 +100,8 @@ async def set_trigger(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ فقط ادمین‌ها میتونن تریگر ثبت کنن")
         return
 
-    if len(context.args) < 3:
-        await update.message.reply_text("❌ استفاده: /set <کلمه> <زمان> <پیام>")
+    if len(context.args) < 2:
+        await update.message.reply_text("❌ استفاده: /set <کلمه> <زمان>")
         return
 
     trigger = context.args[0]
@@ -128,9 +111,16 @@ async def set_trigger(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("⏱ زمان باید عدد باشه")
         return
 
-    message = " ".join(context.args[2:])
+    # متن و entities از خود پیام
+    if update.message.reply_to_message:
+        msg_obj = update.message.reply_to_message
+    else:
+        msg_obj = update.message
 
-    add_trigger(update.effective_chat.id, trigger, delay, message)
+    message = " ".join(context.args[2:]) if len(context.args) > 2 else msg_obj.text_html or ""
+    entities = msg_obj.to_dict().get("entities") or msg_obj.to_dict().get("caption_entities")
+
+    add_trigger(update.effective_chat.id, trigger, delay, message, entities)
     await update.message.reply_text(
         f"✅ تریگر «{trigger}» با تأخیر {delay} ثانیه ثبت شد.\n"
         f"📩 پیام ذخیره‌شده: {message}"
@@ -143,7 +133,7 @@ async def list_triggers(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     msg = "📋 تریگرهای این گروه:\n"
-    for t, d, m in triggers:
+    for t, d, m, _ in triggers:
         msg += f"• {t} → {d} ثانیه → «{m}»\n"
     await update.message.reply_text(msg)
 
@@ -163,20 +153,16 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # خروج
     if "#خروج" in text:
-        add_exit(user_id)
         await update.message.reply_text(f"👋 سفر به سلامت {user_name}")
         return
 
-    # مدیریت گروه‌ها
+    # ثبت عضویت در گروه
     add_membership(user_id, chat_id)
 
     # بررسی تریگرها
     triggers = get_triggers(chat_id)
-    for trigger, delay, message in triggers:
+    for trigger, delay, message, entities in triggers:
         if trigger.lower() in text.lower():
-            # ❌ اگر خروج زده بود، لغو بشه
-            remove_exit(user_id)
-
             # پیام فوری
             info_text = (
                 f"👤 پلیر <b>{user_name}</b> به منطقه <b>{group_name}</b> وارد شد.\n\n"
@@ -188,7 +174,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 reply_to_message_id=update.message.message_id,
             )
 
-            # کاربر رو از بقیه گروه‌ها بنداز بیرون
+            # کاربر رو از بقیه گروه‌ها بنداز بیرون (به جز همین گروه)
             groups = get_memberships(user_id)
             for g in groups:
                 if g != chat_id:
@@ -205,6 +191,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     await asyncio.sleep(delay)
                     await update.message.reply_text(
                         message,
+                        parse_mode=ParseMode.HTML,
+                        entities=json.loads(entities) if entities else None,
                         reply_to_message_id=update.message.message_id,
                     )
                 except Exception as e:
