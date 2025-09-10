@@ -251,7 +251,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         )
                         logging.info(f"✅ کاربر {user_name} به دلیل قرنطینه از گروه {group_name} حذف شد.")
                     except Exception as e:
-                        logging.error(f"❌ خطا در حذف کاربر قرنطینه {user_name} از {group_name}: {e}")
+                        logging.error(f"❌ خطا در حذف کاربر قرنطینه {user_name} от {group_name}: {e}")
                 else:
                     # کاربر در گروه قرنطینه است
                     await update.message.reply_text(
@@ -317,7 +317,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ---------- اجرای ربات ----------
 app = FastAPI()
-application = Application.builder().token(BOT_TOKEN).build()
+
+# ساخت Application به جای Updater
+application = (
+    Application.builder()
+    .token(BOT_TOKEN)
+    .build()
+)
 
 # اضافه کردن هندلرها
 application.add_handler(CommandHandler("start", start))
