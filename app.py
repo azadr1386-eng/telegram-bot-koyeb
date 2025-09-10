@@ -31,7 +31,8 @@ def init_db():
                 chat_id INTEGER,
                 trigger TEXT,
                 delay INTEGER,
-                message TEXT
+                message TEXT,
+                type TEXT
             )""")
         cursor.execute("""CREATE TABLE IF NOT EXISTS memberships (
                 user_id INTEGER,
@@ -42,18 +43,18 @@ def init_db():
 
 init_db()
 
-def add_trigger(chat_id: int, trigger: str, delay: int, message: str):
+def add_trigger(chat_id: int, trigger: str, delay: int, message: str, type_: str = "normal"):
     with sqlite3.connect(DB_FILE) as conn:
         conn.execute(
-            "INSERT INTO triggers (chat_id, trigger, delay, message) VALUES (?, ?, ?, ?)",
-            (chat_id, trigger, delay, message),
+            "INSERT INTO triggers (chat_id, trigger, delay, message, type) VALUES (?, ?, ?, ?, ?)",
+            (chat_id, trigger, delay, message, type_),
         )
         conn.commit()
 
 def get_triggers(chat_id: int):
     with sqlite3.connect(DB_FILE) as conn:
         return conn.execute(
-            "SELECT trigger, delay, message FROM triggers WHERE chat_id = ?", (chat_id,)
+            "SELECT trigger, delay, message, type FROM triggers WHERE chat_id = ?", (chat_id,)
         ).fetchall()
 
 def clear_triggers(chat_id: int):
@@ -110,10 +111,38 @@ async def set_trigger(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     message = " ".join(context.args[2:])
+    add_trigger(update.effective_chat.id, trigger, delay, message, "normal")
 
-    add_trigger(update.effective_chat.id, trigger, delay, message)
     await update.message.reply_text(
-        f"✅ تریگر «{trigger}» با تأخیر {delay} ثانیه ثبت شد.\n"
+        f"✅ تریگر «{trigger}» (عادی) با تأخیر {delay} ثانیه ثبت شد.\n"
+        f"📩 پیام ذخیره‌شده: {message}",
+        parse_mode="HTML",
+    )
+
+async def set_trigger_ban(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    member = await context.bot.get_chat_member(
+        update.effective_chat.id, update.effective_user.id
+    )
+    if member.status not in [ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.OWNER]:
+        await update.message.reply_text("❌ فقط ادمین‌ها میتونن تریگر ثبت کنن")
+        return
+
+    if len(context.args) < 3:
+        await update.message.reply_text("❌ استفاده: /setban <کلمه> <زمان> <پیام>")
+        return
+
+    trigger = context.args[0]
+    try:
+        delay = int(context.args[1])
+    except ValueError:
+        await update.message.reply_text("⏱ زمان باید عدد باشه")
+        return
+
+    message = " ".join(context.args[2:])
+    add_trigger(update.effective_chat.id, trigger, delay, message, "ban")
+
+    await update.message.reply_text(
+        f"✅ تریگر «{trigger}» (بن) با تأخیر {delay} ثانیه ثبت شد.\n"
         f"📩 پیام ذخیره‌شده: {message}",
         parse_mode="HTML",
     )
@@ -125,8 +154,10 @@ async def list_triggers(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     msg = "📋 تریگرهای این گروه:\n\n"
-    for t, d, m in triggers:
-        msg += f"• {t} → {d} ثانیه → «{m}»\n"
+    for t, d, m, type_ in triggers:
+        kind = "🔹عادی" if type_ == "normal" else "🔸بن"
+        msg += f"• {t} ({kind}) → {d} ثانیه → «{m}»\n"
+
     await update.message.reply_text(msg, parse_mode="HTML")
 
 async def clear_all(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -145,7 +176,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # خروج
     if "#خروج" in text:
-        await update.message.reply_text(f"👋 سفر به سلامت {user_name}")
+        try:
+            await context.bot.unban_chat_member(chat_id, user_id)
+            await update.message.reply_text(f"✅ {user_name} دوباره آزاد شد")
+        except Exception as e:
+            logging.error(f"❌ خطا در آنبن: {e}")
         return
 
     # ثبت عضویت در گروه
@@ -153,7 +188,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # بررسی تریگرها
     triggers = get_triggers(chat_id)
-    for trigger, delay, message in triggers:
+    for trigger, delay, message, type_ in triggers:
         if trigger.lower() in text.lower():
             # پیام فوری
             info_text = (
@@ -166,22 +201,23 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 reply_to_message_id=update.message.message_id,
             )
 
-            # کاربر رو از بقیه گروه‌ها بنداز بیرون (به جز همین گروه)
-            groups = get_memberships(user_id)
-            logging.info(f"📌 کاربر {user_name} در گروه‌های: {groups}")
-            for g in groups:
-                if g != chat_id:
-                    try:
-                        bot_member = await context.bot.get_chat_member(g, context.bot.id)
-                        if bot_member.status in [ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.OWNER]:
-                            await context.bot.ban_chat_member(g, user_id)
-                            await context.bot.unban_chat_member(g, user_id)
-                            remove_membership(user_id, g)
-                            logging.info(f"✅ کاربر {user_name} از گروه {g} حذف شد")
-                        else:
-                            logging.warning(f"⚠️ بات توی گروه {g} ادمین نیست، نمی‌تونه {user_name} رو حذف کنه")
-                    except Exception as e:
-                        logging.error(f"❌ خطا در حذف {user_name} از {g}: {e}")
+            # اگر نوع = بن → کاربر رو از بقیه گروه‌ها حذف کن
+            if type_ == "ban":
+                groups = get_memberships(user_id)
+                logging.info(f"📌 کاربر {user_name} در گروه‌های: {groups}")
+                for g in groups:
+                    if g != chat_id:
+                        try:
+                            bot_member = await context.bot.get_chat_member(g, context.bot.id)
+                            if bot_member.status in [ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.OWNER]:
+                                await context.bot.ban_chat_member(g, user_id)
+                                await context.bot.unban_chat_member(g, user_id)
+                                remove_membership(user_id, g)
+                                logging.info(f"✅ کاربر {user_name} از گروه {g} حذف شد")
+                            else:
+                                logging.warning(f"⚠️ بات توی گروه {g} ادمین نیست، نمی‌تونه {user_name} رو حذف کنه")
+                        except Exception as e:
+                            logging.error(f"❌ خطا در حذف {user_name} از {g}: {e}")
 
             # پیام نهایی بعد از تاخیر
             async def delayed_reply():
@@ -195,8 +231,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 except Exception as e:
                     logging.error(e)
 
-            # 🚀 مهم: استفاده از application برای ساخت تسک
-            context.application.create_task(delayed_reply())
+            asyncio.create_task(delayed_reply())
 
 # ---------- اجرای ربات روی Render ----------
 app = FastAPI()
@@ -204,6 +239,7 @@ application = Application.builder().token(BOT_TOKEN).build()
 
 application.add_handler(CommandHandler("start", start))
 application.add_handler(CommandHandler("set", set_trigger))
+application.add_handler(CommandHandler("setban", set_trigger_ban))
 application.add_handler(CommandHandler("list", list_triggers))
 application.add_handler(CommandHandler("clear", clear_all))
 application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
