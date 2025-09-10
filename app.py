@@ -195,7 +195,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 except Exception as e:
                     logging.error(e)
 
-            asyncio.create_task(delayed_reply())
+            # 🚀 مهم: استفاده از application برای ساخت تسک
+            context.application.create_task(delayed_reply())
 
 # ---------- اجرای ربات روی Render ----------
 app = FastAPI()
