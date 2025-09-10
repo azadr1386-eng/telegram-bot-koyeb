@@ -2,10 +2,9 @@ import os
 import logging
 import sqlite3
 import asyncio
-import json
 from fastapi import FastAPI, Request, Response
 from telegram import Update
-from telegram.constants import ParseMode, ChatMemberStatus
+from telegram.constants import ChatMemberStatus
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -44,11 +43,11 @@ def init_db():
 
 init_db()
 
-def add_trigger(chat_id: int, trigger: str, delay: int, message: str, entities):
+def add_trigger(chat_id: int, trigger: str, delay: int, message: str, entities: str = None):
     with sqlite3.connect(DB_FILE) as conn:
         conn.execute(
             "INSERT INTO triggers (chat_id, trigger, delay, message, entities) VALUES (?, ?, ?, ?, ?)",
-            (chat_id, trigger, delay, message, json.dumps(entities) if entities else None),
+            (chat_id, trigger, delay, message, entities),
         )
         conn.commit()
 
@@ -100,8 +99,8 @@ async def set_trigger(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ فقط ادمین‌ها میتونن تریگر ثبت کنن")
         return
 
-    if len(context.args) < 2:
-        await update.message.reply_text("❌ استفاده: /set <کلمه> <زمان>")
+    if len(context.args) < 3:
+        await update.message.reply_text("❌ استفاده: /set <کلمه> <زمان> <پیام>")
         return
 
     trigger = context.args[0]
@@ -111,14 +110,8 @@ async def set_trigger(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("⏱ زمان باید عدد باشه")
         return
 
-    # متن و entities از خود پیام
-    if update.message.reply_to_message:
-        msg_obj = update.message.reply_to_message
-    else:
-        msg_obj = update.message
-
-    message = " ".join(context.args[2:]) if len(context.args) > 2 else msg_obj.text_html or ""
-    entities = msg_obj.to_dict().get("entities") or msg_obj.to_dict().get("caption_entities")
+    message = " ".join(context.args[2:])
+    entities = str(update.message.entities) if update.message.entities else None
 
     add_trigger(update.effective_chat.id, trigger, delay, message, entities)
     await update.message.reply_text(
@@ -170,20 +163,22 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             await update.message.reply_text(
                 info_text,
-                parse_mode=ParseMode.HTML,
+                parse_mode="HTML",
                 reply_to_message_id=update.message.message_id,
             )
 
             # کاربر رو از بقیه گروه‌ها بنداز بیرون (به جز همین گروه)
             groups = get_memberships(user_id)
+            logging.info(f"📌 کاربر {user_name} در گروه‌های: {groups}")
             for g in groups:
                 if g != chat_id:
                     try:
                         await context.bot.ban_chat_member(g, user_id)
                         await context.bot.unban_chat_member(g, user_id)
                         remove_membership(user_id, g)
+                        logging.info(f"✅ کاربر {user_name} از گروه {g} حذف شد")
                     except Exception as e:
-                        logging.error(e)
+                        logging.error(f"❌ خطا در حذف {user_name} از {g}: {e}")
 
             # پیام نهایی بعد از تاخیر
             async def delayed_reply():
@@ -191,8 +186,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     await asyncio.sleep(delay)
                     await update.message.reply_text(
                         message,
-                        parse_mode=ParseMode.HTML,
-                        entities=json.loads(entities) if entities else None,
+                        entities=eval(entities) if entities else None,
                         reply_to_message_id=update.message.message_id,
                     )
                 except Exception as e:
