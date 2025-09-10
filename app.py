@@ -2,8 +2,9 @@ import os
 import logging
 import sqlite3
 import asyncio
+import json
 from fastapi import FastAPI, Request, Response
-from telegram import Update
+from telegram import Update, MessageEntity
 from telegram.constants import ChatMemberStatus
 from telegram.ext import (
     Application,
@@ -111,9 +112,13 @@ async def set_trigger(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     message = " ".join(context.args[2:])
-    entities = str(update.message.entities) if update.message.entities else None
 
-    add_trigger(update.effective_chat.id, trigger, delay, message, entities)
+    # ذخیره entities به صورت JSON
+    entities_json = None
+    if update.message.entities:
+        entities_json = json.dumps([e.to_dict() for e in update.message.entities])
+
+    add_trigger(update.effective_chat.id, trigger, delay, message, entities_json)
     await update.message.reply_text(
         f"✅ تریگر «{trigger}» با تأخیر {delay} ثانیه ثبت شد.\n"
         f"📩 پیام ذخیره‌شده: {message}"
@@ -125,7 +130,7 @@ async def list_triggers(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("📭 هیچ تریگری ثبت نشده.")
         return
 
-    msg = "📋 تریگرهای این گروه:\n"
+    msg = "📋 تریگرهای این گروه:\n\n"
     for t, d, m, _ in triggers:
         msg += f"• {t} → {d} ثانیه → «{m}»\n"
     await update.message.reply_text(msg)
@@ -154,7 +159,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # بررسی تریگرها
     triggers = get_triggers(chat_id)
-    for trigger, delay, message, entities in triggers:
+    for trigger, delay, message, entities_json in triggers:
         if trigger.lower() in text.lower():
             # پیام فوری
             info_text = (
@@ -173,10 +178,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             for g in groups:
                 if g != chat_id:
                     try:
-                        await context.bot.ban_chat_member(g, user_id)
-                        await context.bot.unban_chat_member(g, user_id)
-                        remove_membership(user_id, g)
-                        logging.info(f"✅ کاربر {user_name} از گروه {g} حذف شد")
+                        bot_member = await context.bot.get_chat_member(g, context.bot.id)
+                        if bot_member.status in [ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.OWNER]:
+                            await context.bot.ban_chat_member(g, user_id)
+                            await context.bot.unban_chat_member(g, user_id)
+                            remove_membership(user_id, g)
+                            logging.info(f"✅ کاربر {user_name} از گروه {g} حذف شد")
+                        else:
+                            logging.warning(f"⚠️ بات توی گروه {g} ادمین نیست، نمی‌تونه {user_name} رو حذف کنه")
                     except Exception as e:
                         logging.error(f"❌ خطا در حذف {user_name} از {g}: {e}")
 
@@ -184,9 +193,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             async def delayed_reply():
                 try:
                     await asyncio.sleep(delay)
+                    entities = None
+                    if entities_json:
+                        entities_list = json.loads(entities_json)
+                        entities = [MessageEntity.from_dict(e) for e in entities_list]
+
                     await update.message.reply_text(
                         message,
-                        entities=eval(entities) if entities else None,
+                        entities=entities,
                         reply_to_message_id=update.message.message_id,
                     )
                 except Exception as e:
