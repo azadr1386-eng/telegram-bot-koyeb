@@ -32,7 +32,7 @@ def init_db():
                 trigger TEXT,
                 delay INTEGER,
                 message TEXT,
-                trigger_type TEXT DEFAULT 'normal'
+                type TEXT
             )""")
         cursor.execute("""CREATE TABLE IF NOT EXISTS memberships (
                 user_id INTEGER,
@@ -45,18 +45,18 @@ def init_db():
 
 init_db()
 
-def add_trigger(chat_id: int, trigger: str, delay: int, message: str, trigger_type: str = "normal"):
+def add_trigger(chat_id: int, trigger: str, delay: int, message: str, type_: str = "normal"):
     with sqlite3.connect(DB_FILE) as conn:
         conn.execute(
-            "INSERT INTO triggers (chat_id, trigger, delay, message, trigger_type) VALUES (?, ?, ?, ?, ?)",
-            (chat_id, trigger, delay, message, trigger_type),
+            "INSERT INTO triggers (chat_id, trigger, delay, message, type) VALUES (?, ?, ?, ?, ?)",
+            (chat_id, trigger, delay, message, type_),
         )
         conn.commit()
 
 def get_triggers(chat_id: int):
     with sqlite3.connect(DB_FILE) as conn:
         return conn.execute(
-            "SELECT trigger, delay, message, trigger_type FROM triggers WHERE chat_id = ?", (chat_id,)
+            "SELECT trigger, delay, message, type FROM triggers WHERE chat_id = ?", (chat_id,)
         ).fetchall()
 
 def clear_triggers(chat_id: int):
@@ -67,7 +67,7 @@ def clear_triggers(chat_id: int):
 def add_membership(user_id: int, chat_id: int):
     with sqlite3.connect(DB_FILE) as conn:
         conn.execute(
-            "INSERT OR IGNORE INTO memberships (user_id, chat_id) VALUES (?, ?)",
+            "INSERT OR REPLACE INTO memberships (user_id, chat_id) VALUES (?, ?)",
             (user_id, chat_id),
         )
         conn.commit()
@@ -135,15 +135,15 @@ async def set_trigger(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     message = " ".join(context.args[2:])
+    add_trigger(update.effective_chat.id, trigger, delay, message, "normal")
 
-    add_trigger(update.effective_chat.id, trigger, delay, message)
     await update.message.reply_text(
-        f"✅ تریگر «{trigger}» با تأخیر {delay} ثانیه ثبت شد.\n"
+        f"✅ تریگر «{trigger}» (عادی) با تأخیر {delay} ثانیه ثبت شد.\n"
         f"📩 پیام ذخیره‌شده: {message}",
         parse_mode="HTML",
     )
 
-async def set_quarantine_trigger(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def set_trigger_ban(update: Update, context: ContextTypes.DEFAULT_TYPE):
     member = await context.bot.get_chat_member(
         update.effective_chat.id, update.effective_user.id
     )
@@ -152,7 +152,7 @@ async def set_quarantine_trigger(update: Update, context: ContextTypes.DEFAULT_T
         return
 
     if len(context.args) < 3:
-        await update.message.reply_text("❌ استفاده: /setquarantine <کلمه_ورود> <زمان> <پیام>")
+        await update.message.reply_text("❌ استفاده: /setban <کلمه> <زمان> <پیام>")
         return
 
     trigger = context.args[0]
@@ -163,10 +163,10 @@ async def set_quarantine_trigger(update: Update, context: ContextTypes.DEFAULT_T
         return
 
     message = " ".join(context.args[2:])
+    add_trigger(update.effective_chat.id, trigger, delay, message, "ban")
 
-    add_trigger(update.effective_chat.id, trigger, delay, message, "quarantine")
     await update.message.reply_text(
-        f"🔒 تریگر قرنطینه «{trigger}» با تأخیر {delay} ثانیه ثبت شد.\n"
+        f"✅ تریگر «{trigger}» (بن) با تأخیر {delay} ثانیه ثبت شد.\n"
         f"📩 پیام ذخیره‌شده: {message}",
         parse_mode="HTML",
     )
@@ -178,11 +178,10 @@ async def list_triggers(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     msg = "📋 تریگرهای این گروه:\n\n"
-    for t, d, m, trigger_type in triggers:
-        if trigger_type == "quarantine":
-            msg += f"🔒 {t} (قرنطینه) → {d} ثانیه → «{m}»\n"
-        else:
-            msg += f"• {t} → {d} ثانیه → «{m}»\n"
+    for t, d, m, type_ in triggers:
+        kind = "🔹عادی" if type_ == "normal" else "🔸بن"
+        msg += f"• {t} ({kind}) → {d} ثانیه → «{m}»\n"
+
     await update.message.reply_text(msg, parse_mode="HTML")
 
 async def clear_all(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -193,7 +192,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message or not update.message.text:
         return
 
-    text = update.message.text
+    text = update.message.text.lower()
     user_id = update.effective_user.id
     user_name = update.effective_user.full_name
     chat_id = update.effective_chat.id
@@ -203,7 +202,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     is_quarantined, quarantined_in_chat_id = get_user_quarantine_status(user_id)
 
     # اگر کاربر #خروج بزند و در قرنطینه باشد
-    if "#خروج" in text.lower() and is_quarantined:
+    if "#خروج" in text and is_quarantined:
         set_user_quarantine_status(user_id, False)
         await update.message.reply_text(
             f"🎉 {user_name}، شما از قرنطینه خارج شدید و می‌توانید به گروه‌های دیگر بروید.",
@@ -231,24 +230,23 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # بررسی تریگرها
     triggers = get_triggers(chat_id)
-    for trigger, delay, message, trigger_type in triggers:
-        if trigger.lower() in text.lower():
-            if trigger_type == "quarantine":
-                # فعا�� کردن قرنطینه برای کاربر
+    for trigger, delay, message, type_ in triggers:
+        if trigger.lower() in text:
+            # پیام فوری
+            info_text = (
+                f"👤 پلیر <b>{user_name}</b> به منطقه <b>{group_name}</b> وارد شد.\n\n"
+                f"⏱ مدت زمان سفر شما <b>{delay} ثانیه</b> می‌باشد."
+            )
+            await update.message.reply_text(
+                info_text,
+                parse_mode="HTML",
+                reply_to_message_id=update.message.message_id,
+            )
+
+            # اگر نوع = بن → کاربر رو از بقیه گروه‌ها حذف کن و قرنطینه کن
+            if type_ == "ban":
                 set_user_quarantine_status(user_id, True, chat_id)
                 
-                # پیام فوری
-                info_text = (
-                    f"👤 پلیر <b>{user_name}</b> به منطقه <b>{group_name}</b> وارد شد و قرنطینه شد.\n\n"
-                    f"⏱ مدت زمان قرنطینه شما <b>{delay} ثانیه</b> می‌باشد."
-                )
-                await update.message.reply_text(
-                    info_text,
-                    parse_mode="HTML",
-                    reply_to_message_id=update.message.message_id,
-                )
-
-                # کاربر رو از بقیه گروه‌ها بنداز بیرون (به جز همین گروه)
                 groups = get_memberships(user_id)
                 logging.info(f"📌 کاربر {user_name} در گروه‌های: {groups}")
                 for g in groups:
@@ -274,27 +272,22 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         parse_mode="HTML",
                         reply_to_message_id=update.message.message_id,
                     )
-                    
-                    # اگر تریگر قرنطینه است، راهنمای خروج را نمایش بده
-                    if trigger_type == "quarantine":
-                        await update.message.reply_text(
-                            "🔓 برای خروج از قرنطینه، لطفاً #خروج را ارسال کنید.",
-                            parse_mode="HTML"
-                        )
                 except Exception as e:
                     logging.error(e)
 
-            # ایجاد تسک
             asyncio.create_task(delayed_reply())
-            break
 
 # ---------- اجرای ربات روی Render ----------
 app = FastAPI()
-application = Application.builder().token(BOT_TOKEN).build()
+application = (
+    Application.builder()
+    .token(BOT_TOKEN)
+    .build()
+)
 
 application.add_handler(CommandHandler("start", start))
 application.add_handler(CommandHandler("set", set_trigger))
-application.add_handler(CommandHandler("setquarantine", set_quarantine_trigger))
+application.add_handler(CommandHandler("setban", set_trigger_ban))
 application.add_handler(CommandHandler("list", list_triggers))
 application.add_handler(CommandHandler("clear", clear_all))
 application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
