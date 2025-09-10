@@ -30,7 +30,8 @@ def init_db():
         cursor.execute("""CREATE TABLE IF NOT EXISTS triggers (
                 chat_id INTEGER,
                 trigger TEXT,
-                delay INTEGER
+                delay INTEGER,
+                message TEXT
             )""")
         cursor.execute("""CREATE TABLE IF NOT EXISTS exits (
                 user_id INTEGER PRIMARY KEY
@@ -44,15 +45,19 @@ def init_db():
 
 init_db()
 
-def add_trigger(chat_id: int, trigger: str, delay: int):
+def add_trigger(chat_id: int, trigger: str, delay: int, message: str):
     with sqlite3.connect(DB_FILE) as conn:
-        conn.execute("INSERT INTO triggers (chat_id, trigger, delay) VALUES (?, ?, ?)",
-                     (chat_id, trigger, delay))
+        conn.execute(
+            "INSERT INTO triggers (chat_id, trigger, delay, message) VALUES (?, ?, ?, ?)",
+            (chat_id, trigger, delay, message),
+        )
         conn.commit()
 
 def get_triggers(chat_id: int):
     with sqlite3.connect(DB_FILE) as conn:
-        return conn.execute("SELECT trigger, delay FROM triggers WHERE chat_id = ?", (chat_id,)).fetchall()
+        return conn.execute(
+            "SELECT trigger, delay, message FROM triggers WHERE chat_id = ?", (chat_id,)
+        ).fetchall()
 
 def clear_triggers(chat_id: int):
     with sqlite3.connect(DB_FILE) as conn:
@@ -64,26 +69,40 @@ def add_exit(user_id: int):
         conn.execute("INSERT OR REPLACE INTO exits (user_id) VALUES (?)", (user_id,))
         conn.commit()
 
+def remove_exit(user_id: int):
+    with sqlite3.connect(DB_FILE) as conn:
+        conn.execute("DELETE FROM exits WHERE user_id = ?", (user_id,))
+        conn.commit()
+
 def has_exit(user_id: int) -> bool:
     with sqlite3.connect(DB_FILE) as conn:
-        return conn.execute("SELECT 1 FROM exits WHERE user_id = ?", (user_id,)).fetchone() is not None
+        return conn.execute(
+            "SELECT 1 FROM exits WHERE user_id = ?", (user_id,)
+        ).fetchone() is not None
 
 def add_membership(user_id: int, chat_id: int):
     with sqlite3.connect(DB_FILE) as conn:
-        conn.execute("INSERT OR REPLACE INTO memberships (user_id, chat_id) VALUES (?, ?)",
-                     (user_id, chat_id))
+        conn.execute(
+            "INSERT OR REPLACE INTO memberships (user_id, chat_id) VALUES (?, ?)",
+            (user_id, chat_id),
+        )
         conn.commit()
 
 def get_memberships(user_id: int):
     with sqlite3.connect(DB_FILE) as conn:
-        return [row[0] for row in conn.execute(
-            "SELECT chat_id FROM memberships WHERE user_id = ?", (user_id,)
-        ).fetchall()]
+        return [
+            row[0]
+            for row in conn.execute(
+                "SELECT chat_id FROM memberships WHERE user_id = ?", (user_id,)
+            ).fetchall()
+        ]
 
 def remove_membership(user_id: int, chat_id: int):
     with sqlite3.connect(DB_FILE) as conn:
-        conn.execute("DELETE FROM memberships WHERE user_id = ? AND chat_id = ?",
-                     (user_id, chat_id))
+        conn.execute(
+            "DELETE FROM memberships WHERE user_id = ? AND chat_id = ?",
+            (user_id, chat_id),
+        )
         conn.commit()
 
 # ---------- هندلرها ----------
@@ -91,14 +110,17 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("✅ ربات روشنه و روی Render فعاله")
 
 async def set_trigger(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    member = await context.bot.get_chat_member(update.effective_chat.id, update.effective_user.id)
+    member = await context.bot.get_chat_member(
+        update.effective_chat.id, update.effective_user.id
+    )
     if member.status not in [ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.OWNER]:
         await update.message.reply_text("❌ فقط ادمین‌ها میتونن تریگر ثبت کنن")
         return
 
-    if len(context.args) < 2:
-        await update.message.reply_text("❌ استفاده: /set <کلمه> <زمان>")
+    if len(context.args) < 3:
+        await update.message.reply_text("❌ استفاده: /set <کلمه> <زمان> <پیام>")
         return
+
     trigger = context.args[0]
     try:
         delay = int(context.args[1])
@@ -106,8 +128,13 @@ async def set_trigger(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("⏱ زمان باید عدد باشه")
         return
 
-    add_trigger(update.effective_chat.id, trigger, delay)
-    await update.message.reply_text(f"✅ تریگر «{trigger}» با تأخیر {delay} ثانیه ثبت شد.")
+    message = " ".join(context.args[2:])
+
+    add_trigger(update.effective_chat.id, trigger, delay, message)
+    await update.message.reply_text(
+        f"✅ تریگر «{trigger}» با تأخیر {delay} ثانیه ثبت شد.\n"
+        f"📩 پیام ذخیره‌شده: {message}"
+    )
 
 async def list_triggers(update: Update, context: ContextTypes.DEFAULT_TYPE):
     triggers = get_triggers(update.effective_chat.id)
@@ -116,8 +143,8 @@ async def list_triggers(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     msg = "📋 تریگرهای این گروه:\n"
-    for t, d in triggers:
-        msg += f"• {t} → {d} ثانیه\n"
+    for t, d, m in triggers:
+        msg += f"• {t} → {d} ثانیه → «{m}»\n"
     await update.message.reply_text(msg)
 
 async def clear_all(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -142,13 +169,29 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # مدیریت گروه‌ها
     add_membership(user_id, chat_id)
-    groups = get_memberships(user_id)
 
-    if not has_exit(user_id) and len(groups) > 1:
-        member_status = await context.bot.get_chat_member(chat_id, user_id)
-        if member_status.status not in [ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.OWNER]:
+    # بررسی تریگرها
+    triggers = get_triggers(chat_id)
+    for trigger, delay, message in triggers:
+        if trigger.lower() in text.lower():
+            # ❌ اگر خروج زده بود، لغو بشه
+            remove_exit(user_id)
+
+            # پیام فوری
+            info_text = (
+                f"👤 پلیر <b>{user_name}</b> به منطقه <b>{group_name}</b> وارد شد.\n\n"
+                f"⏱ مدت زمان سفر شما <b>{delay} ثانیه</b> می‌باشد."
+            )
+            await update.message.reply_text(
+                info_text,
+                parse_mode=ParseMode.HTML,
+                reply_to_message_id=update.message.message_id,
+            )
+
+            # کاربر رو از بقیه گروه‌ها بنداز بیرون
+            groups = get_memberships(user_id)
             for g in groups:
-                if g != chat_id:  # ✅ فقط از گروه‌های دیگه کیک بشه
+                if g != chat_id:
                     try:
                         await context.bot.ban_chat_member(g, user_id)
                         await context.bot.unban_chat_member(g, user_id)
@@ -156,21 +199,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     except Exception as e:
                         logging.error(e)
 
-    # بررسی تریگرها
-    triggers = get_triggers(chat_id)
-    for trigger, delay in triggers:
-        if trigger.lower() in text.lower():
-            reply_text = (
-                f"👤 پلیر <b>{user_name}</b> به منطقه <b>{group_name}</b> وارد شد.\n\n"
-                f"⏱ مدت زمان سفر شما <b>{delay} ثانیه</b> می‌باشد."
-            )
-
+            # پیام نهایی بعد از تاخیر
             async def delayed_reply():
                 try:
                     await asyncio.sleep(delay)
                     await update.message.reply_text(
-                        reply_text,
-                        parse_mode=ParseMode.HTML,
+                        message,
                         reply_to_message_id=update.message.message_id,
                     )
                 except Exception as e:
