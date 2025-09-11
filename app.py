@@ -4,20 +4,24 @@ import sqlite3
 import asyncio
 from fastapi import FastAPI, Request, Response
 from telegram import Update
-from telegram.constants import ChatMemberStatus
-from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters
+from telegram.ext import (
+    Application,
+    CommandHandler,
+    MessageHandler,
+    ContextTypes,
+    filters,
+)
 
-# ---------- تنظیمات ----------
+# ---------------- تنظیمات ----------------
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "YOUR_BOT_TOKEN_HERE")
+DB_FILE = "bot_settings.db"
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     level=logging.INFO,
 )
 
-DB_FILE = "bot_settings.db"
-
-# ---------- دیتابیس ----------
+# ---------------- دیتابیس ----------------
 def init_db():
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
@@ -42,7 +46,7 @@ def init_db():
 
 init_db()
 
-# ---------- توابع دیتابیس ----------
+# ---------------- توابع دیتابیس ----------------
 def add_trigger(chat_id, trigger, delay, message, type_="normal", related_trigger_word=None):
     with sqlite3.connect(DB_FILE) as conn:
         conn.execute(
@@ -94,81 +98,65 @@ def get_user_global_quarantine_status(user_id):
         ).fetchone()
         return result if result else (0, None, None)
 
-# ---------- هندلرها ----------
+# ---------------- هندلرها ----------------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("✅ ربات روشنه و فعاله")
+    await update.message.reply_text("✅ ربات روشن و فعاله")
 
 async def set_trigger_normal(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # ... (مثل نسخه قبل، بدون تغییر)
-    pass
+    # TODO: پرکردن مثل نسخه‌ی قبلی
+    await update.message.reply_text("📌 دستور set_trigger_normal اجرا شد")
 
 async def set_trigger_quarantine(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # ... (مثل نسخه قبل، بدون تغییر)
-    pass
+    # TODO: پرکردن مثل نسخه‌ی قبلی
+    await update.message.reply_text("📌 دستور set_trigger_quarantine اجرا شد")
 
 async def set_trigger_unquarantine(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # ... (مثل نسخه قبل، بدون تغییر)
-    pass
+    # TODO: پرکردن مثل نسخه‌ی قبلی
+    await update.message.reply_text("📌 دستور set_trigger_unquarantine اجرا شد")
 
 async def list_triggers(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # ... (مثل نسخه قبل، بدون تغییر)
-    pass
+    triggers = get_triggers(update.effective_chat.id)
+    if not triggers:
+        await update.message.reply_text("⛔️ هیچ تریگری ثبت نشده")
+    else:
+        text = "\n".join([f"{t[0]} → {t[2]}s → {t[1]}" for t in triggers])
+        await update.message.reply_text(f"📋 لیست تریگرها:\n{text}")
 
 async def clear_all(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # ... (مثل نسخه قبل، بدون تغییر)
-    pass
+    clear_triggers(update.effective_chat.id)
+    await update.message.reply_text("✅ همه تریگرها پاک شد")
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # ... (مثل نسخه قبل، بدون تغییر)
-    pass
+    await update.message.reply_text(f"پیامت دریافت شد: {update.message.text}")
 
-# ---------- اجرای ربات ----------
+# ---------------- اپلیکیشن تلگرام ----------------
+def create_application():
+    application = Application.builder().token(BOT_TOKEN).build()
+
+    # اضافه کردن هندلرها
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("set", set_trigger_normal))
+    application.add_handler(CommandHandler("setquarantine", set_trigger_quarantine))
+    application.add_handler(CommandHandler("setunquarantine", set_trigger_unquarantine))
+    application.add_handler(CommandHandler("list", list_triggers))
+    application.add_handler(CommandHandler("clear", clear_all))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+
+    return application
+
+telegram_app = create_application()
+
+# ---------------- اپلیکیشن FastAPI ----------------
 app = FastAPI()
-application = Application.builder().token(BOT_TOKEN).build()
 
-# اضافه کردن هندلرها
-application.add_handler(CommandHandler("start", start))
-application.add_handler(CommandHandler("set", set_trigger_normal))
-application.add_handler(CommandHandler("setquarantine", set_trigger_quarantine))
-application.add_handler(CommandHandler("setunquarantine", set_trigger_unquarantine))
-application.add_handler(CommandHandler("list", list_triggers))
-application.add_handler(CommandHandler("clear", clear_all))
-application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+@app.get("/")
+async def root():
+    return {"status": "ok", "message": "Bot is running on Render"}
 
-# ---------- مدیریت lifecycle ----------
+# ---------------- اجرای همزمان ----------------
+async def run_bot():
+    await telegram_app.run_polling(close_loop=False)
+
 @app.on_event("startup")
 async def on_startup():
-    await application.initialize()
-    await application.start()  # 🔥 اضافه شد
-    logging.info("🚀 Bot initialized. Waiting for webhook events...")
-
-@app.on_event("shutdown")
-async def on_shutdown():
-    await application.stop()     # 🔥 اضافه شد
-    await application.shutdown()
-
-@app.post(f"/webhook/{BOT_TOKEN}")
-async def telegram_webhook(request: Request):
-    try:
-        data = await request.json()
-        update = Update.de_json(data, application.bot)
-        await application.process_update(update)
-        return Response(status_code=200)
-    except Exception as e:
-        logging.error(f"خطا در webhook: {e}")
-        return Response(status_code=500)
-
-@app.get("/health")
-def health():
-    return {"ok": True}
-
-@app.get("/set-webhook")
-async def set_webhook(request: Request):
-    try:
-        base_url = str(request.base_url).rstrip("/")
-        webhook_url = f"{base_url}/webhook/{BOT_TOKEN}"
-        await application.bot.set_webhook(url=webhook_url)
-        return {"status": "set", "webhook": webhook_url}
-    except Exception as e:
-        logging.error(f"خطا در set-webhook: {e}")
-        return {"status": "error", "message": str(e)}
+    asyncio.create_task(run_bot())
