@@ -1,8 +1,7 @@
 import os
 import logging
 import sqlite3
-import asyncio
-from fastapi import FastAPI, Request, Response
+from fastapi import FastAPI, Request
 from telegram import Update
 from telegram.ext import (
     Application,
@@ -15,6 +14,8 @@ from telegram.ext import (
 # ---------------- تنظیمات ----------------
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "YOUR_BOT_TOKEN_HERE")
 DB_FILE = "bot_settings.db"
+WEBHOOK_PATH = f"/webhook/{BOT_TOKEN}"
+WEBHOOK_URL = os.environ.get("WEBHOOK_URL")  # مثل https://your-app.onrender.com/webhook/<BOT_TOKEN>
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -47,14 +48,6 @@ def init_db():
 init_db()
 
 # ---------------- توابع دیتابیس ----------------
-def add_trigger(chat_id, trigger, delay, message, type_="normal", related_trigger_word=None):
-    with sqlite3.connect(DB_FILE) as conn:
-        conn.execute(
-            "INSERT INTO triggers (chat_id, trigger, delay, message, type, related_trigger_word) VALUES (?, ?, ?, ?, ?, ?)",
-            (chat_id, trigger, delay, message, type_, related_trigger_word),
-        )
-        conn.commit()
-
 def get_triggers(chat_id):
     with sqlite3.connect(DB_FILE) as conn:
         return conn.execute(
@@ -66,53 +59,9 @@ def clear_triggers(chat_id):
         conn.execute("DELETE FROM triggers WHERE chat_id = ?", (chat_id,))
         conn.commit()
 
-def add_membership(user_id, chat_id):
-    with sqlite3.connect(DB_FILE) as conn:
-        conn.execute("INSERT OR IGNORE INTO memberships (user_id, chat_id) VALUES (?, ?)", (user_id, chat_id))
-        conn.commit()
-
-def get_user_memberships_with_status(user_id):
-    with sqlite3.connect(DB_FILE) as conn:
-        return conn.execute(
-            "SELECT chat_id, is_quarantined, quarantined_in_chat_id, awaiting_unban_trigger FROM memberships WHERE user_id = ?", (user_id,)
-        ).fetchall()
-
-def remove_membership(user_id, chat_id):
-    with sqlite3.connect(DB_FILE) as conn:
-        conn.execute("DELETE FROM memberships WHERE user_id = ? AND chat_id = ?", (user_id, chat_id))
-        conn.commit()
-
-def set_user_quarantine_status(user_id, is_quarantined, quarantined_in_chat_id=None, awaiting_unban_trigger=None):
-    with sqlite3.connect(DB_FILE) as conn:
-        conn.execute(
-            "UPDATE memberships SET is_quarantined = ?, quarantined_in_chat_id = ?, awaiting_unban_trigger = ? WHERE user_id = ?",
-            (1 if is_quarantined else 0, quarantined_in_chat_id, awaiting_unban_trigger, user_id),
-        )
-        conn.commit()
-
-def get_user_global_quarantine_status(user_id):
-    with sqlite3.connect(DB_FILE) as conn:
-        result = conn.execute(
-            "SELECT is_quarantined, quarantined_in_chat_id, awaiting_unban_trigger FROM memberships WHERE user_id = ? AND is_quarantined = 1 LIMIT 1",
-            (user_id,)
-        ).fetchone()
-        return result if result else (0, None, None)
-
 # ---------------- هندلرها ----------------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("✅ ربات روشن و فعاله")
-
-async def set_trigger_normal(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # TODO: پرکردن مثل نسخه‌ی قبلی
-    await update.message.reply_text("📌 دستور set_trigger_normal اجرا شد")
-
-async def set_trigger_quarantine(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # TODO: پرکردن مثل نسخه‌ی قبلی
-    await update.message.reply_text("📌 دستور set_trigger_quarantine اجرا شد")
-
-async def set_trigger_unquarantine(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # TODO: پرکردن مثل نسخه‌ی قبلی
-    await update.message.reply_text("📌 دستور set_trigger_unquarantine اجرا شد")
+    await update.message.reply_text("✅ ربات با وبهوک روی Render فعاله")
 
 async def list_triggers(update: Update, context: ContextTypes.DEFAULT_TYPE):
     triggers = get_triggers(update.effective_chat.id)
@@ -130,33 +79,35 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"پیامت دریافت شد: {update.message.text}")
 
 # ---------------- اپلیکیشن تلگرام ----------------
-def create_application():
-    application = Application.builder().token(BOT_TOKEN).build()
+telegram_app = (
+    Application.builder()
+    .token(BOT_TOKEN)
+    .build()
+)
 
-    # اضافه کردن هندلرها
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(CommandHandler("set", set_trigger_normal))
-    application.add_handler(CommandHandler("setquarantine", set_trigger_quarantine))
-    application.add_handler(CommandHandler("setunquarantine", set_trigger_unquarantine))
-    application.add_handler(CommandHandler("list", list_triggers))
-    application.add_handler(CommandHandler("clear", clear_all))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-
-    return application
-
-telegram_app = create_application()
+telegram_app.add_handler(CommandHandler("start", start))
+telegram_app.add_handler(CommandHandler("list", list_triggers))
+telegram_app.add_handler(CommandHandler("clear", clear_all))
+telegram_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
 # ---------------- اپلیکیشن FastAPI ----------------
 app = FastAPI()
 
 @app.get("/")
 async def root():
-    return {"status": "ok", "message": "Bot is running on Render"}
+    return {"status": "ok", "message": "Bot is running on Render with Webhook"}
 
-# ---------------- اجرای همزمان ----------------
-async def run_bot():
-    await telegram_app.run_polling(close_loop=False)
+@app.post(WEBHOOK_PATH)
+async def telegram_webhook(req: Request):
+    data = await req.json()
+    update = Update.de_json(data, telegram_app.bot)
+    await telegram_app.process_update(update)
+    return {"ok": True}
 
+# ---------------- استارتاپ ----------------
 @app.on_event("startup")
 async def on_startup():
-    asyncio.create_task(run_bot())
+    # تنظیم وبهوک روی تلگرام
+    if WEBHOOK_URL:
+        await telegram_app.bot.set_webhook(url=WEBHOOK_URL + WEBHOOK_PATH)
+        logging.info(f"Webhook set to {WEBHOOK_URL}{WEBHOOK_PATH}")
