@@ -1,0 +1,10 @@
+{
+  "botToken": "8417380853:AAFSGS_huuIwSANap2pmn_j_8EMMHUqTQMI",
+  "adminId": 7495437597,
+  "callTimeout": 60000,
+  "maxCallDuration": 300000,
+  "webhookUrl": "https://yourdomain.com/telegram-webhook",
+  "webhookPort": 8443,
+  "sslCertPath": "/path/to/ssl/cert.pem",
+  "sslKeyPath": "/path/to/ssl/private.key"
+}
