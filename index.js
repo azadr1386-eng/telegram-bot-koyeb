@@ -7,8 +7,10 @@ app.use(express.json());
 
 // ----- تنظیمات -----
 const TOKEN = process.env.BOT_TOKEN;
-const URL = process.env.RENDER_EXTERNAL_URL; // از Environment Variables توی Render میاد
+const URL = process.env.RENDER_EXTERNAL_URL; // از Environment Variables توی Render
 const PORT = process.env.PORT || 3000;
+
+// ربات روی وبهوک
 const bot = new TelegramBot(TOKEN, { webHook: { port: PORT } });
 
 // ست کردن وبهوک
@@ -17,14 +19,16 @@ await bot.setWebHook(WEBHOOK_URL);
 
 // دیتابیس سبک JSON
 const adapter = new JSONFile("db.json");
-const db = new Low(adapter);
+const db = new Low(adapter, { users: [], calls: [] });
 await db.read();
-db.data ||= { users: [], calls: [] };
 
 // ----- ثبت شماره -----
 bot.onText(/\/register (.+)/, async (msg, match) => {
   const chatId = msg.chat.id;
   const number = match[1];
+
+  // اگر قبلا ثبت شده پاک کن
+  db.data.users = db.data.users.filter(u => u.id !== chatId);
 
   db.data.users.push({ id: chatId, number });
   await db.write();
@@ -83,7 +87,7 @@ bot.on("callback_query", async (query) => {
     bot.sendMessage(call.from, "☎️ تماس وصل شد! حالا پیام‌ها خصوصی بین شما رد و بدل میشه.");
     bot.sendMessage(call.to, "☎️ تماس وصل شد! حالا پیام‌ها خصوصی بین شما رد و بدل میشه.");
 
-    // حالت «هاید»
+    // حالت «هاید» برای پیام‌ها
     bot.on("message", (msg) => {
       if (msg.chat.id === call.from) {
         bot.sendMessage(call.to, `🔒 ${msg.text}`);
