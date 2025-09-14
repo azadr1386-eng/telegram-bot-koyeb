@@ -338,10 +338,9 @@ bot.on('text', async (ctx) => {
 // ================== راه‌اندازی سرور ================== //
 
 app.use(express.json());
-app.use(bot.webhookCallback('/telegram-webhook'));
 
 // مسیر سلامت
-app.get('/health', (req, res) => {
+app.get('/', (req, res) => {
   res.json({ 
     status: 'OK', 
     timestamp: new Date().toISOString(),
@@ -350,16 +349,32 @@ app.get('/health', (req, res) => {
   });
 });
 
+// مسیر وب‌هاک
+app.use(bot.webhookCallback('/telegram-webhook'));
+
+// راه‌اندازی سرور
 app.listen(PORT, async () => {
   console.log(`🚀 سرور در حال اجرا روی پورت ${PORT}`);
   
   try {
-    const webhookUrl = process.env.WEBHOOK_URL || `https://your-app-name.onrender.com`;
-    await bot.telegram.setWebhook(`${webhookUrl}/telegram-webhook`);
-    console.log('✅ وب‌هاک تنظیم شد');
+    const webhookUrl = process.env.WEBHOOK_URL;
+    if (!webhookUrl) {
+      console.error('❌ WEBHOOK_URL تنظیم نشده است');
+      return;
+    }
+    
+    // تنظیم Webhook
+    const fullWebhookUrl = `${webhookUrl}/telegram-webhook`;
+    await bot.telegram.setWebhook(fullWebhookUrl);
+    console.log('✅ وب‌هاک تنظیم شد:', fullWebhookUrl);
+    
   } catch (error) {
     console.error('❌ خطا در تنظیم وب‌هاک:', error.message);
   }
 });
+
+// graceful shutdown
+process.once('SIGINT', () => bot.stop('SIGINT'));
+process.once('SIGTERM', () => bot.stop('SIGTERM'));
 
 console.log('🤖 ربات مخابراتی گروهی در حال راه‌اندازی...');
