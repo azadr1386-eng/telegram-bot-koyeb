@@ -15,14 +15,14 @@ if (!process.env.BOT_TOKEN) {
 const bot = new Telegraf(process.env.BOT_TOKEN);
 
 // دیتابیس ساده در حافظه
-const users = new Map(); // user_id -> { phoneNumber, username, registered }
-const calls = new Map(); // call_id -> callData
-const userStates = new Map(); // user_id -> { currentCall, isInCall }
+const users = new Map();
+const calls = new Map();
+const userStates = new Map();
 
 // مدیریت خطای دسترسی
 bot.catch((err, ctx) => {
   if (err.message.includes('not enough rights')) {
-    console.log('⚠️  ربات دسترسی لازم را در گروه ندارد');
+    console.log('⚠️ ربات دسترسی لازم را در گروه ندارد');
     if (ctx.chat.type !== 'private') {
       ctx.reply('🤖 لطفاً مرا به عنوان ادمین گروه تنظیم کنید تا بتوانم کار کنم.').catch(() => {});
     }
@@ -180,7 +180,7 @@ bot.on('message', async (ctx) => {
     
     const calleeState = userStates.get(calleeId);
     if (calleeState && calleeState.currentCall) {
-      return ctx.reply('❌ کاربر مقصد در حال حاضر در تماس است.');
+      return ctx.reply('❌ пользователь مقصد در حال حاضر در تماس است.');
     }
     
     // ایجاد تماس جدید
@@ -357,7 +357,7 @@ app.listen(PORT, async () => {
   console.log(`🚀 سرور در حال اجرا روی پورت ${PORT}`);
   
   try {
-    const webhookUrl = process.env.WEBHOOK_URL;
+    const webhookUrl = process.env.WEBHOOK_URL || 'https://telegram-bot-koyeb-14.onrender.com';
     if (!webhookUrl) {
       console.error('❌ WEBHOOK_URL تنظیم نشده است');
       return;
@@ -378,3 +378,4 @@ process.once('SIGINT', () => bot.stop('SIGINT'));
 process.once('SIGTERM', () => bot.stop('SIGTERM'));
 
 console.log('🤖 ربات مخابراتی گروهی در حال راه‌اندازی...');
+});
