@@ -371,14 +371,29 @@ app.use(express.json());
 // وب‌هاک برای تلگرام
 app.use(bot.webhookCallback('/telegram-webhook'));
 
-// مسیر سلامت
+// ================== مورد ۲: مسیر سلامت ================== //
 app.get('/health', (req, res) => {
   res.json({ 
     status: 'OK', 
     timestamp: new Date().toISOString(),
     users: users.size,
     activeCalls: activeCalls.size,
-    totalCalls: calls.size
+    totalCalls: calls.size,
+    server: 'Telecom Bot Server',
+    version: '1.0.0'
+  });
+});
+
+// ================== مورد ۳: مسیر تست ================== //
+app.get('/test', (req, res) => {
+  res.json({
+    status: 'active',
+    message: 'سرور در حال اجراست',
+    timestamp: new Date().toISOString(),
+    webhookUrl: process.env.WEBHOOK_URL || 'Not set',
+    botToken: process.env.BOT_TOKEN ? 'SET' : 'MISSING',
+    serverTime: new Date().toLocaleString('fa-IR'),
+    uptime: process.uptime() + ' seconds'
   });
 });
 
@@ -394,6 +409,8 @@ app.get('/', (req, res) => {
         body { font-family: Tahoma, sans-serif; text-align: center; padding: 50px; }
         h1 { color: #0088cc; }
         .status { background: #f0f9ff; padding: 20px; border-radius: 10px; }
+        .links { margin: 20px 0; }
+        .links a { display: inline-block; margin: 10px; padding: 10px 20px; background: #0088cc; color: white; text-decoration: none; border-radius: 5px; }
       </style>
     </head>
     <body>
@@ -402,6 +419,11 @@ app.get('/', (req, res) => {
         <p>✅ سرور فعال و آماده به کار</p>
         <p>👥 کاربران ثبت‌شده: ${users.size}</p>
         <p>📞 تماس‌های فعال: ${activeCalls.size}</p>
+        <p>🕒 زمان سرور: ${new Date().toLocaleString('fa-IR')}</p>
+      </div>
+      <div class="links">
+        <a href="/health">بررسی سلامت سرویس</a>
+        <a href="/test">تست سرور</a>
       </div>
     </body>
     </html>
@@ -412,15 +434,24 @@ app.get('/', (req, res) => {
 app.listen(PORT, async () => {
   console.log(`🚀 سرور در حال اجرا روی پورت ${PORT}`);
   
-  // تنظیم وب‌هاک
+  // تنظیم وب‌هاک - استفاده از URL کامل Render
+  const webhookUrl = process.env.WEBHOOK_URL || `https://telegram-bot-koyeb-14.onrender.com`;
+  
   try {
-    await bot.telegram.setWebhook(`${process.env.WEBHOOK_URL || 'http://localhost:' + PORT}/telegram-webhook`);
+    await bot.telegram.setWebhook(`${webhookUrl}/telegram-webhook`);
     console.log('✅ وب‌هاک با موفقیت تنظیم شد');
+    console.log('🌐 آدرس وب‌هاک:', `${webhookUrl}/telegram-webhook`);
     
     const webhookInfo = await bot.telegram.getWebhookInfo();
     console.log('📋 اطلاعات وب‌هاک:', webhookInfo.url);
   } catch (error) {
-    console.error('❌ خطا در تنظیم وب‌هاک:', error);
+    console.error('❌ خطا در تنظیم وب‌هاک:', error.message);
+    
+    // اگر خطا مربوط به HTTPS است، راهنمایی کنیم
+    if (error.message.includes('HTTPS')) {
+      console.log('💡 راهنمایی: باید از آدرس HTTPS استفاده کنید');
+      console.log('🔗 آدرس فعلی شما:', webhookUrl);
+    }
   }
 });
 
@@ -434,15 +465,4 @@ bot.catch((err, ctx) => {
 
 // مدیریت خروج تمیز
 process.once('SIGINT', () => {
-  console.log('🛑 در حال خروج...');
-  bot.stop('SIGINT');
-  process.exit(0);
-});
-
-process.once('SIGTERM', () => {
-  console.log('🛑 در حال خروج...');
-  bot.stop('SIGTERM');
-  process.exit(0);
-});
-
-console.log('🤖 ربات مخابراتی پیشرفته در حال راه‌اندازی...');
+  console.log('🛑 در حال خروج...');})
