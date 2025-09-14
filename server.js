@@ -1,8 +1,7 @@
 const express = require('express');
 const bodyParser = require('body-parser');
-const https = require('https');
-const fs = require('fs');
 const TelegramBot = require('node-telegram-bot-api');
+const { v4: uuidv4 } = require('uuid');
 const config = require('./config.json');
 const db = require('./database');
 
@@ -24,22 +23,16 @@ app.get('/health', (req, res) => {
   res.json({ status: 'OK', timestamp: new Date().toISOString() });
 });
 
-// راه‌اندازی سرور HTTPS
-const httpsOptions = {
-  key: fs.readFileSync(config.sslKeyPath),
-  cert: fs.readFileSync(config.sslCertPath)
-};
-
-const server = https.createServer(httpsOptions, app);
-
-server.listen(config.webhookPort, () => {
-  console.log(`Webhook server running on port ${config.webhookPort}`);
-  console.log(`Webhook URL: ${config.webhookUrl}`);
-});
-
-// مدیریت خطاهای سرور
-server.on('error', (error) => {
-  console.error('Server error:', error);
+// راه‌اندازی سرور (بدون HTTPS - Render خودش مدیریت می‌کنه)
+const port = process.env.PORT || config.webhookPort || 3000;
+app.listen(port, () => {
+  console.log(`سرور روی پورت ${port} اجرا شد`);
+  
+  // تنظیم وب‌هاک
+  const webhookUrl = process.env.WEBHOOK_URL || config.webhookUrl;
+  bot.setWebHook(`${webhookUrl}/telegram-webhook`)
+    .then(() => console.log('Webhook با موفقیت تنظیم شد'))
+    .catch(error => console.error('خطا در تنظیم Webhook:', error));
 });
 
 // ========== دستورات ربات ========== //
