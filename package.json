@@ -1,24 +1,21 @@
 {
-  "name": "telecom-bot-webhook",
+  "name": "telegram-bot",
   "version": "1.0.0",
-  "description": "A Telegram telecom bot using webhooks",
-  "main": "server.js",
+  "description": "ربات تلگرام برای ارتباط لاین اکلیس",
+  "main": "index.js",
   "scripts": {
-    "start": "node server.js",
-    "dev": "nodemon server.js",
-    "set-webhook": "node set-webhook.js"
+    "start": "node index.js",
+    "dev": "nodemon index.js"
   },
   "dependencies": {
-    "node-telegram-bot-api": "^0.64.0",
-    "uuid": "^9.0.1",
-    "lowdb": "^6.0.1",
-    "express": "^4.18.2",
-    "body-parser": "^1.20.2"
+    "telegraf": "^4.12.2",
+    "dotenv": "^16.3.1",
+    "express": "^4.18.2"
   },
   "devDependencies": {
-    "nodemon": "^3.0.2"
+    "nodemon": "^3.0.1"
   },
-  "keywords": ["telegram", "bot", "webhook", "telecom"],
-  "author": "You",
+  "keywords": ["telegram", "bot", "telegraf"],
+  "author": "Your Name",
   "license": "MIT"
 }

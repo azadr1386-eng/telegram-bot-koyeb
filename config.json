@@ -1,8 +1,0 @@
-{
-  "botToken": "8417380853:AAFSGS_huuIwSANap2pmn_j_8EMMHUqTQMIر",
-  "adminId": 7495437597,
-  "callTimeout": 60000,
-  "maxCallDuration": 300000,
-  "webhookUrl": "https://telegram-bot-koyeb-14.onrender.com/telegram-webhook",
-  "webhookPort": 3000
-}
