@@ -173,7 +173,8 @@ bot.command('call', async (ctx) => {
     callerNumber: callerData.phoneNumber,
     calleeNumber: calleeData.phoneNumber,
     callerName: callerData.username,
-    calleeName: calleeData.username
+    calleeName: calleeData.username,
+    callerChatId: ctx.chat.id // ذخیره آیدی چت caller
   };
   
   calls.set(callId, callData);
@@ -183,7 +184,7 @@ bot.command('call', async (ctx) => {
   // ارسال پیام به caller
   ctx.reply(`📞 در حال اتصال به ${targetNumber}...`);
   
-  // ارسال پیام شیشه‌ای به callee
+  // ارسال پیام شیشه‌ای به callee - در هر گروهی که باشد
   const replyMarkup = Markup.inlineKeyboard([
     [
       Markup.button.callback('📞 پاسخ دادن', `answer_${callId}`),
@@ -191,13 +192,24 @@ bot.command('call', async (ctx) => {
     ]
   ]);
   
-  ctx.telegram.sendMessage(calleeId, 
-    `📞 **تماس ورودی**\n\nاز: ${callerData.phoneNumber} (${callerData.username})\n\n⏰ زمان: ${new Date().toLocaleTimeString('fa-IR')}`, 
-    { 
-      ...replyMarkup,
-      parse_mode: 'Markdown'
-    }
-  );
+  // ارسال پیام به کاربر مقصد در هر گروهی که باشد
+  try {
+    await ctx.telegram.sendMessage(
+      calleeId, 
+      `📞 **تماس ورودی**\n\nاز: ${callerData.phoneNumber} (${callerData.username})\n\n⏰ زمان: ${new Date().toLocaleTimeString('fa-IR')}`, 
+      { 
+        ...replyMarkup,
+        parse_mode: 'Markdown'
+      }
+    );
+  } catch (error) {
+    console.error('خطا در ارسال پیام به کاربر:', error);
+    ctx.reply('❌ خطا در برقراری تماس. کاربر ممکن است ربات را بلاک کرده باشد.');
+    callerData.currentCall = null;
+    calleeData.currentCall = null;
+    calls.delete(callId);
+    return;
+  }
   
   // زمان‌بندی برای قطع تماس در صورت عدم پاسخ
   const timeout = setTimeout(() => {
@@ -292,8 +304,8 @@ bot.action(/reject_(.+)/, async (ctx) => {
   }
 });
 
-// انتقال پیام‌های بین کاربران در تماس
-bot.on('text', (ctx) => {
+// انتقال پیام‌های بین کاربران در تماس - بدون پیام تأیید
+bot.on('text', async (ctx) => {
   if (ctx.message.text.startsWith('/')) return;
   
   const userId = ctx.from.id;
@@ -309,22 +321,18 @@ bot.on('text', (ctx) => {
   const partnerData = users.get(partnerId);
   
   if (partnerData) {
-    // ارسال پیام به کاربر مقابل (هاید)
-    ctx.telegram.sendMessage(
-      partnerId, 
-      `📞 **پیام از ${userData.phoneNumber}**\n\n${ctx.message.text}\n\n👤 ارسال کننده: ${userData.username}`,
-      { parse_mode: 'Markdown' }
-    );
+    // ارسال پیام به کاربر مقابل (هاید) - بدون پیام تأیید
+    try {
+      await ctx.telegram.sendMessage(
+        partnerId, 
+        `📞 **پیام از ${userData.phoneNumber}**\n\n${ctx.message.text}\n\n👤 ارسال کننده: ${userData.username}`,
+        { parse_mode: 'Markdown' }
+      );
+    } catch (error) {
+      console.error('خطا در ارسال پیام:', error);
+    }
     
-    // تأیید ارسال پیام برای فرستنده
-    ctx.reply('✅ پیام شما ارسال شد.').then(sentMsg => {
-      // حذف پیام تأیید بعد از 2 ثانیه
-      setTimeout(() => {
-        ctx.deleteMessage(sentMsg.message_id).catch(() => {});
-      }, 2000);
-    });
-    
-    // حذف پیام اصلی از چت
+    // فقط پیام اصلی را حذف کن (بدون پیام تأیید)
     ctx.deleteMessage().catch(() => {});
   }
 });
@@ -371,7 +379,7 @@ app.use(express.json());
 // وب‌هاک برای تلگرام
 app.use(bot.webhookCallback('/telegram-webhook'));
 
-// ================== مورد ۲: مسیر سلامت ================== //
+// مسیر سلامت
 app.get('/health', (req, res) => {
   res.json({ 
     status: 'OK', 
@@ -384,7 +392,7 @@ app.get('/health', (req, res) => {
   });
 });
 
-// ================== مورد ۳: مسیر تست ================== //
+// مسیر تست
 app.get('/test', (req, res) => {
   res.json({
     status: 'active',
@@ -465,4 +473,15 @@ bot.catch((err, ctx) => {
 
 // مدیریت خروج تمیز
 process.once('SIGINT', () => {
-  console.log('🛑 در حال خروج...');})
+  console.log('🛑 در حال خروج...');
+  bot.stop('SIGINT');
+  process.exit(0);
+});
+
+process.once('SIGTERM', () => {
+  console.log('🛑 در حال خروج...');
+  bot.stop('SIGTERM');
+  process.exit(0);
+});
+
+console.log('🤖 ربات مخابراتی پیشرفته در حال راه‌اندازی...');
