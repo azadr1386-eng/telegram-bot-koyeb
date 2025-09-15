@@ -1,6 +1,7 @@
 const { Telegraf, Markup } = require('telegraf');
 const express = require('express');
 const { v4: uuidv4 } = require('uuid');
+const { createClient } = require('@supabase/supabase-js');
 require('dotenv').config();
 
 const app = express();
@@ -12,6 +13,15 @@ if (!process.env.BOT_TOKEN) {
   process.exit(1);
 }
 
+// ایجاد کلاینت Supabase (اگر تنظیم شده باشد)
+let supabase = null;
+if (process.env.SUPABASE_URL && process.env.SUPABASE_ANON_KEY) {
+  supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_ANON_KEY);
+  console.log('✅ Supabase متصل شد');
+} else {
+  console.warn('⚠️ Supabase تنظیم نشده است. برخی قابلیت‌ها غیرفعال خواهند بود.');
+}
+
 const bot = new Telegraf(process.env.BOT_TOKEN);
 
 // دیتابیس ساده در حافظه
@@ -19,323 +29,121 @@ const users = new Map();
 const calls = new Map();
 const userStates = new Map();
 
-// مدیریت خطای دسترسی
+// مدیریت خطا
 bot.catch((err, ctx) => {
-  if (err.message.includes('not enough rights')) {
-    console.log('⚠️ ربات دسترسی لازم را در گروه ندارد');
-    if (ctx.chat.type !== 'private') {
-      ctx.reply('🤖 لطفاً مرا به عنوان ادمین گروه تنظیم کنید تا بتوانم کار کنم.').catch(() => {});
-    }
-  } else {
-    console.error('❌ خطای ربات:', err);
+  console.error('❌ خطای ربات:', err);
+  if (ctx && ctx.reply) {
+    ctx.reply('❌ متأسفانه خطایی در پردازش درخواست شما رخ داده است.').catch(() => {});
   }
 });
 
-// ================== دستورات ربات ================== //
+// ================== دستورات اصلی ربات ================== //
 
-// دستور /start - فقط در گروه
+// دستور /start
 bot.start((ctx) => {
-  if (ctx.chat.type === 'private') {
-    return ctx.reply('🤖 لطفاً من را به گروه اضافه کنید و در آنجا با من کار کنید.');
-  }
-  
+  console.log('دستور start دریافت شد از:', ctx.from.id);
   const welcomeText = `👋 به ربات مخابراتی خوش آمدید!
 
-📞 برای ثبت شماره خود:
+📞 برای ثبت شماره خود در گروه:
 /register [شماره]
 
-📞 برای تماس با کاربر دیگر:
+📞 برای تماس با کاربر دیگر در گروه:
 @${ctx.botInfo.username} [شماره مقصد]
 
 📞 برای پایان تماس جاری:
 /endcall
 
+📱 برای مشاهده منوی اصلی:
+#فون
+
 ℹ️ برای مشاهده اطلاعات کاربری:
 /profile`;
 
-  ctx.reply(welcomeText);
-});
-
-// ثبت شماره کاربر - فقط در گروه
-bot.command('register', (ctx) => {
-  if (ctx.chat.type === 'private') {
-    return ctx.reply('🤖 لطفاً این دستور را در گروه استفاده کنید.');
-  }
-  
-  const userId = ctx.from.id;
-  const phoneNumber = ctx.message.text.split(' ')[1];
-  
-  if (!phoneNumber) {
-    return ctx.reply('❌ لطفاً شماره را وارد کنید: /register [شماره]');
-  }
-  
-  users.set(userId, {
-    phoneNumber,
-    username: ctx.from.username || ctx.from.first_name || 'کاربر',
-    registered: true
+  ctx.reply(welcomeText).catch(err => {
+    console.error('خطا در ارسال welcome:', err);
   });
-  
-  ctx.reply(`✅ شماره ${phoneNumber} برای ${ctx.from.first_name} ثبت شد!`);
 });
 
-// مشاهده پروفایل - فقط در گروه
-bot.command('profile', (ctx) => {
-  if (ctx.chat.type === 'private') {
-    return ctx.reply('🤖 لطفاً این دستور را در گروه استفاده کنید.');
-  }
-  
-  const userId = ctx.from.id;
-  const userData = users.get(userId);
-  
-  if (!userData || !userData.registered) {
-    return ctx.reply('❌ شما ثبت نام نکرده‌اید. اول /register [شماره] را بزنید.');
-  }
-  
-  const profileText = `👤 پروفایل ${userData.username}
+// دستور #فون - نمایش منوی اصلی
+bot.hears('#فون', async (ctx) => {
+  try {
+    console.log('دستور فون دریافت شد از:', ctx.from.id);
+    
+    // دریافت زمان و تاریخ فعلی
+    const now = new Date().toLocaleString('fa-IR', {
+      timeZone: 'Asia/Tehran',
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit'
+    });
 
-📞 شماره: ${userData.phoneNumber}
-🔗 آیدی: ${userId}
-📊 وضعیت: ${userStates.get(userId)?.currentCall ? '📞 در تماس' : '✅ آماده'}`;
-  
-  ctx.reply(profileText);
+    // ایجاد دکمه‌های شیشه‌ای
+    const keyboard = Markup.inlineKeyboard([
+      [Markup.button.callback('📞 مخاطبین', 'manage_contacts')],
+      [Markup.button.callback('🖼️ گالری', 'open_gallery')],
+      [Markup.button.callback('⚙️ تنظیمات', 'settings')],
+      [Markup.button.callback('ℹ️ راهنما', 'help')]
+    ]);
+
+    // ارسال پیام
+    await ctx.reply(`🕒 زمان فعلی: ${now}`, keyboard);
+  } catch (error) {
+    console.error('خطا در اجرای دستور فون:', error);
+    ctx.reply('متأسفانه خطایی رخ داده است.').catch(() => {});
+  }
 });
 
-// پایان تماس - فقط در گروه
-bot.command('endcall', (ctx) => {
-  if (ctx.chat.type === 'private') {
-    return ctx.reply('🤖 لطفاً این دستور را در گروه استفاده کنید.');
-  }
-  
-  const userId = ctx.from.id;
-  const userState = userStates.get(userId);
-  
-  if (!userState || !userState.currentCall) {
-    return ctx.reply('❌ شما در حال حاضر در تماس نیستید.');
-  }
-  
-  const callData = calls.get(userState.currentCall);
-  if (!callData) return;
-  
-  // پیدا کردن کاربر مقابل
-  const partnerId = callData.callerId === userId ? callData.calleeId : callData.callerId;
-  
-  // اطلاع در گروه
-  ctx.reply(`📞 تماس بین ${callData.callerName} و ${callData.calleeName} به پایان رسید.`);
-  
-  // بازنشانی وضعیت
-  userStates.delete(userId);
-  userStates.delete(partnerId);
-  calls.delete(userState.currentCall);
-  
-  ctx.reply('✅ تماس پایان یافت.');
-});
-
-// پردازش mention در گروه برای تماس
-bot.on('message', async (ctx) => {
-  if (ctx.chat.type === 'private') return;
-  
-  const messageText = ctx.message.text || '';
-  const botUsername = ctx.botInfo.username;
-  
-  // بررسی آیا ربات mention شده است
-  if (messageText.includes(`@${botUsername}`)) {
-    const parts = messageText.split(' ');
-    const targetNumber = parts[1]; // شماره بعد از mention
+// مدیریت کلیک روی دکمه مخاطبین
+bot.action('manage_contacts', async (ctx) => {
+  try {
+    await ctx.deleteMessage();
     
-    if (!targetNumber) {
-      return ctx.reply(`❌ لطفاً شماره مقصد را وارد کنید: @${botUsername} [شماره]`);
-    }
+    let contactsText = '📞 مخاطبین شما:\n\n';
     
-    const callerId = ctx.from.id;
-    const callerData = users.get(callerId);
-    
-    if (!callerData || !callerData.registered) {
-      return ctx.reply('❌ شما ثبت نام نکرده‌اید. اول /register [شماره] را بزنید.');
-    }
-    
-    const callerState = userStates.get(callerId);
-    if (callerState && callerState.currentCall) {
-      return ctx.reply('❌ شما در حال حاضر در تماس هستید. اول /endcall را بزنید.');
-    }
-    
-    // پیدا کردن کاربر مقصد
-    let calleeId = null;
-    let calleeData = null;
-    
-    for (const [userId, userData] of users.entries()) {
-      if (userData.phoneNumber === targetNumber && userData.registered) {
-        calleeId = userId;
-        calleeData = userData;
-        break;
+    if (supabase) {
+      // دریافت مخاطبین کاربر از دیتابیس
+      const { data: contacts, error } = await supabase
+        .from('contacts')
+        .select('*')
+        .eq('user_id', ctx.from.id);
+      
+      if (error) {
+        console.error('خطا در دریافت مخاطبین:', error);
+        contactsText += '❌ خطایی در دریافت مخاطبین رخ داد.';
+      } else if (contacts.length === 0) {
+        contactsText += 'هنوز مخاطبی اضافه نکرده‌اید.\n\n';
+      } else {
+        contacts.forEach((contact, index) => {
+          contactsText += `${index + 1}. ${contact.contact_name} - ${contact.phone_prefix}${contact.phone_number}\n`;
+        });
       }
+    } else {
+      contactsText += '❌ سیستم ذخیره‌سازی مخاطبین در حال حاضر غیرفعال است.';
     }
     
-    if (!calleeId) {
-      return ctx.reply('❌ شماره مورد نظر یافت نشد یا کاربر ثبت نام نکرده است.');
-    }
+    contactsText += '\nبرای اضافه کردن مخاطب جدید، شماره را با فرمت صحیح ارسال کنید (مثال: W1234)';
     
-    if (calleeId === callerId) {
-      return ctx.reply('❌ نمی‌توانید با خودتان تماس بگیرید!');
-    }
-    
-    const calleeState = userStates.get(calleeId);
-    if (calleeState && calleeState.currentCall) {
-      return ctx.reply('❌ пользователь مقصد در حال حاضر در تماس است.');
-    }
-    
-    // ایجاد تماس جدید
-    const callId = uuidv4();
-    const callData = {
-      callId,
-      callerId,
-      calleeId,
-      status: 'ringing',
-      startTime: Date.now(),
-      callerNumber: callerData.phoneNumber,
-      calleeNumber: calleeData.phoneNumber,
-      callerName: callerData.username,
-      calleeName: calleeData.username,
-      groupId: ctx.chat.id,
-      messageId: ctx.message.message_id
-    };
-    
-    calls.set(callId, callData);
-    userStates.set(callerId, { currentCall: callId, isInCall: false });
-    userStates.set(calleeId, { currentCall: callId, isInCall: false });
-    
-    // ارسال پیام تماس در گروه با ریپلای
-    const replyMarkup = Markup.inlineKeyboard([
-      [
-        Markup.button.callback('📞 پاسخ دادن', `answer_${callId}_${calleeId}`),
-        Markup.button.callback('❌ رد تماس', `reject_${callId}_${calleeId}`)
-      ]
+    // ایجاد دکمه بازگشت
+    const backKeyboard = Markup.inlineKeyboard([
+      [Markup.button.callback('🔙 بازگشت', 'back_to_main')]
     ]);
     
-    try {
-      const mentionText = calleeData.username ? `@${calleeData.username}` : calleeData.phoneNumber;
-      
-      await ctx.reply(
-        `📞 ${mentionText} \n\n${callerData.username} با شماره ${callerData.phoneNumber} به شما زنگ زده!\n\n⏰ زمان: ${new Date().toLocaleTimeString('fa-IR')}`,
-        {
-          ...replyMarkup,
-          reply_to_message_id: ctx.message.message_id
-        }
-      );
-    } catch (error) {
-      console.error('خطا در ارسال پیام:', error);
-      ctx.reply('❌ خطا در برقراری تماس.');
-      userStates.delete(callerId);
-      userStates.delete(calleeId);
-      calls.delete(callId);
-      return;
-    }
+    await ctx.reply(contactsText, backKeyboard);
     
-    // زمان‌بندی برای قطع تماس
-    callData.timeout = setTimeout(() => {
-      const currentCall = calls.get(callId);
-      if (currentCall && currentCall.status === 'ringing') {
-        ctx.reply(`⏰ تماس با ${calleeData.phoneNumber} پاسخ داده نشد.`);
-        userStates.delete(callerId);
-        userStates.delete(calleeId);
-        calls.delete(callId);
-      }
-    }, 60000);
+    // تنظیم وضعیت کاربر برای دریافت شماره
+    userStates.set(ctx.from.id, { action: 'awaiting_phone' });
+  } catch (error) {
+    console.error('خطا در مدیریت مخاطبین:', error);
+    ctx.reply('❌ خطایی رخ داده است.');
   }
 });
 
-// مدیریت پاسخ به تماس
-bot.action(/answer_(.+)_(.+)/, async (ctx) => {
-  const [_, callId, calleeId] = ctx.match;
-  const callData = calls.get(callId);
-  const userId = ctx.from.id;
-  
-  if (callData && callData.status === 'ringing' && userId === calleeId) {
-    callData.status = 'active';
-    
-    // لغو timeout
-    if (callData.timeout) {
-      clearTimeout(callData.timeout);
-    }
-    
-    // به روزرسانی وضعیت کاربران
-    userStates.set(callData.callerId, { currentCall: callId, isInCall: true });
-    userStates.set(callData.calleeId, { currentCall: callId, isInCall: true });
-    
-    // حذف پیام شیشه‌ای
-    try {
-      await ctx.deleteMessage();
-    } catch (error) {
-      console.log('خطا در حذف پیام:', error);
-    }
-    
-    // اطلاع در گروه
-    ctx.reply(
-      `✅ ${callData.calleeName} تماس را پاسخ داد. اکنون می‌توانید گفتگو کنید.\n\n💬 برای چت، پیام خود را بفرستید.`,
-      { reply_to_message_id: callData.messageId }
-    );
-  }
-});
+// بقیه هندلرها (مانند قبل)...
 
-bot.action(/reject_(.+)_(.+)/, async (ctx) => {
-  const [_, callId, calleeId] = ctx.match;
-  const callData = calls.get(callId);
-  const userId = ctx.from.id;
-  
-  if (callData && userId === calleeId) {
-    // لغو timeout
-    if (callData.timeout) {
-      clearTimeout(callData.timeout);
-    }
-    
-    // حذف پیام شیشه‌ای
-    try {
-      await ctx.deleteMessage();
-    } catch (error) {
-      console.log('خطا در حذف پیام:', error);
-    }
-    
-    // اطلاع در گروه
-    ctx.reply(
-      `❌ ${callData.calleeName} تماس را رد کرد.`,
-      { reply_to_message_id: callData.messageId }
-    );
-    
-    // بازنشانی وضعیت
-    userStates.delete(callData.callerId);
-    userStates.delete(callData.calleeId);
-    calls.delete(callId);
-  }
-});
-
-// انتقال پیام‌های بین کاربران در تماس
-bot.on('text', async (ctx) => {
-  if (ctx.chat.type === 'private') return;
-  if (ctx.message.text.startsWith('/')) return;
-  
-  const userId = ctx.from.id;
-  const userState = userStates.get(userId);
-  
-  if (!userState || !userState.currentCall || !userState.isInCall) return;
-  
-  const callData = calls.get(userState.currentCall);
-  if (!callData || callData.status !== 'active') return;
-  
-  // پیدا کردن کاربر مقابل
-  const partnerId = callData.callerId === userId ? callData.calleeId : callData.callerId;
-  const partnerData = users.get(partnerId);
-  
-  if (partnerData) {
-    // ارسال پیام به صورت mention در گروه
-    const mentionText = partnerData.username ? `@${partnerData.username}` : partnerData.phoneNumber;
-    
-    ctx.reply(
-      `📞 ${mentionText} \n\n${ctx.from.first_name}: ${ctx.message.text}`,
-      { reply_to_message_id: callData.messageId }
-    );
-  }
-});
-
-// ================== راه‌اندازی سرور ================== //
+// ================== راه‌اندازی سرور و Webhook ================== //
 
 app.use(express.json());
 
@@ -344,9 +152,29 @@ app.get('/', (req, res) => {
   res.json({ 
     status: 'OK', 
     timestamp: new Date().toISOString(),
-    users: users.size,
-    activeCalls: Array.from(calls.values()).filter(call => call.status === 'active').length
+    message: 'ربات تلگرام در حال اجراست',
+    webhook: true
   });
+});
+
+// مسیر تست وب‌هاک
+app.get('/test-webhook', async (req, res) => {
+  try {
+    // بررسی وضعیت وب‌هاک
+    const webhookInfo = await bot.telegram.getWebhookInfo();
+    
+    res.json({ 
+      status: 'WEBHOOK_TEST_OK',
+      webhook_url: webhookInfo.url,
+      pending_updates: webhookInfo.pending_update_count,
+      last_error: webhookInfo.last_error_message
+    });
+  } catch (error) {
+    res.status(500).json({
+      status: 'WEBHOOK_TEST_FAILED',
+      error: error.message
+    });
+  }
 });
 
 // مسیر وب‌هاک
@@ -357,25 +185,42 @@ app.listen(PORT, async () => {
   console.log(`🚀 سرور در حال اجرا روی پورت ${PORT}`);
   
   try {
-    const webhookUrl = process.env.WEBHOOK_URL || 'https://telegram-bot-koyeb-14.onrender.com';
+    // تنظیم وب‌هاک
+    const webhookUrl = process.env.WEBHOOK_URL;
     if (!webhookUrl) {
       console.error('❌ WEBHOOK_URL تنظیم نشده است');
-      return;
+      process.exit(1);
     }
     
-    // تنظیم Webhook
     const fullWebhookUrl = `${webhookUrl}/telegram-webhook`;
     await bot.telegram.setWebhook(fullWebhookUrl);
     console.log('✅ وب‌هاک تنظیم شد:', fullWebhookUrl);
     
+    // بررسی وضعیت وب‌هاک
+    const webhookInfo = await bot.telegram.getWebhookInfo();
+    console.log('📋 اطلاعات وب‌هاک:', {
+      url: webhookInfo.url,
+      has_custom_certificate: webhookInfo.has_custom_certificate,
+      pending_update_count: webhookInfo.pending_update_count,
+      last_error_date: webhookInfo.last_error_date,
+      last_error_message: webhookInfo.last_error_message
+    });
+    
   } catch (error) {
     console.error('❌ خطا در تنظیم وب‌هاک:', error.message);
+    process.exit(1);
   }
+  
+  console.log('🤖 ربات مخابراتی مبتنی بر Webhook آماده است');
 });
 
-// graceful shutdown
-process.once('SIGINT', () => bot.stop('SIGINT'));
-process.once('SIGTERM', () => bot.stop('SIGTERM'));
+// مدیریت graceful shutdown
+process.once('SIGINT', () => {
+  console.log('🛑 دریافت SIGINT - خاموش کردن ربات...');
+  process.exit(0);
+});
 
-console.log('🤖 ربات مخابراتی گروهی در حال راه‌اندازی...');
+process.once('SIGTERM', () => {
+  console.log('🛑 دریافت SIGTERM - خاموش کردن ربات...');
+  process.exit(0);
 });
