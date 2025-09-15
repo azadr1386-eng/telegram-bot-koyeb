@@ -886,16 +886,4 @@ bot.action(/quick_call_(.+)/, async (ctx) => {
     ctx.answerCbQuery('📞 در حال برقراری تماس...');
   } catch (error) {
     console.error('خطا در تماس سریع:', error);
-    ctx.answerCbQuery('❌ خطایی در تماس سریع رخ داد.');
-  }
-});
-
-// هندلرهای جدید برای دوربین و گالری
-bot.action('camera', async (ctx) => {
-  await ctx.answerCbQuery();
-  await ctx.reply('📸 دوربین: این قابلیت به زودی اضافه خواهد شد.');
-});
-
-bot.action('gallery', async (ctx) => {
-  await ctx.answerCbQuery();
-  await ctx.reply('🖼️ گالری:
+    ctx.answerCbQuery('❌ خطایی در تم
