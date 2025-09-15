@@ -1,14 +1,14 @@
 /**
- * full-featured telegraph call-bot (webhook-ready)
- * - uses Supabase when configured, otherwise falls back to in-memory globals
- * - stores active_calls in DB so calls survive restarts
- * - auto-miss handling, answer/reject/end handlers
- * - reply_to_message_id stored for better UX
- * - contact management (add/list/delete), quick call from contacts
+ * full-featured Telegram call-bot (webhook-only)
+ * - Supabase optional, else memory fallback
+ * - Active calls persist for restarts
+ * - Auto-missed handling, answer/reject/end
+ * - Contact management (add/list/delete)
+ * - Mention-based calls (@bot A1234) and quick call buttons
  *
  * Required env:
  * BOT_TOKEN
- * BASE_URL (https://telegram-bot-koyeb-19.onrender.com)
+ * BASE_URL  (https://telegram-bot-koyeb-19.onrender.com)
  * PORT (optional)
  * SUPABASE_URL (optional)
  * SUPABASE_ANON_KEY (optional)
@@ -20,62 +20,284 @@ const { v4: uuidv4 } = require('uuid');
 const { createClient } = require('@supabase/supabase-js');
 require('dotenv').config();
 
+// ---------- config ----------
 const BOT_TOKEN = process.env.BOT_TOKEN;
-const BASE_URL = 'https://telegram-bot-koyeb-19.onrender.com';
+const BASE_URL = process.env.BASE_URL; // must be https://...
 const PORT = process.env.PORT || 3000;
 
-if (!BOT_TOKEN) { console.error('❌ BOT_TOKEN تنظیم نشده'); process.exit(1); }
+if (!BOT_TOKEN) { console.error('❌ BOT_TOKEN تنظیم نشده است'); process.exit(1); }
+if (!BASE_URL) { console.error('❌ BASE_URL تنظیم نشده است'); process.exit(1); }
 
+// Supabase client (optional)
 let supabase = null;
 if (process.env.SUPABASE_URL && process.env.SUPABASE_ANON_KEY) {
   supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_ANON_KEY);
   console.log('✅ Supabase متصل شد');
-}
+} else console.warn('⚠️ Supabase تنظیم نشده — از حافظه محلی استفاده می‌شود.');
 
+// ---------- memory fallback ----------
 global.users = global.users || {};
-global.callHistory = global.callHistory || [];
-global.activeCalls = global.activeCalls || {};
 global.contacts = global.contacts || {};
+global.activeCalls = global.activeCalls || {};
+global.callHistory = global.callHistory || [];
 
+// ---------- bot & server ----------
 const bot = new Telegraf(BOT_TOKEN);
 const app = express();
 app.use(express.json());
 
-bot.use(session({ defaultSession: () => ({ userState:'none', userPhone:null, contacts:[], calls:[], activeCall:null, tempContactName:null }) }));
+// ---------- session ----------
+bot.use(session({
+  defaultSession: () => ({
+    userState: 'none',
+    tempContactName: null
+  })
+}));
 
-const USER_STATES = { NONE:'none', AWAITING_CONTACT_NAME:'awaiting_contact_name', AWAITING_CONTACT_PHONE:'awaiting_contact_phone' };
+// ---------- constants ----------
+const USER_STATES = {
+  NONE: 'none',
+  AWAITING_CONTACT_NAME: 'awaiting_contact_name',
+  AWAITING_CONTACT_PHONE: 'awaiting_contact_phone'
+};
 
-function isValidPhoneNumber(phone) { return /^[A-Za-z]\d{4}$/.test((phone||'').trim()); }
-function createMainMenu(){ return Markup.inlineKeyboard([[Markup.button.callback('📞 مخاطبین','manage_contacts'),Markup.button.callback('📸 دوربین','camera'),Markup.button.callback('🖼️ گالری','gallery')],[Markup.button.callback('📒 دفترچه','call_history'),Markup.button.callback('📞 تماس','quick_call'),Markup.button.callback('ℹ️ راهنما','help')]]);}
-function createCallResponseKeyboard(callId){ return Markup.inlineKeyboard([[Markup.button.callback('✅ پاسخ',`answer_call_${callId}`),Markup.button.callback('❌ رد',`reject_call_${callId}`)]]);}
-function createEndCallKeyboard(callId){ return Markup.inlineKeyboard([[Markup.button.callback('📞 پایان تماس',`end_call_${callId}`)]]);}
-function createContactButtons(contacts){ const buttons=[]; for(let i=0;i<contacts.length;i+=3){ buttons.push(contacts.slice(i,i+3).map(c=>Markup.button.callback(`👤 ${c.contact_name}`,`quick_call_${c.phone_number}`))); } buttons.push([Markup.button.callback('🔙 بازگشت','back_to_main')]); return Markup.inlineKeyboard(buttons);}
-function createContactsManagementKeyboard(){ return Markup.inlineKeyboard([[Markup.button.callback('➕ افزودن مخاطب','add_contact')],[Markup.button.callback('📞 تماس از مخاطبین','call_from_contacts')],[Markup.button.callback('🗑️ حذف مخاطب','delete_contact')],[Markup.button.callback('🔙 بازگشت','back_to_main')]]); }
+// ---------- helpers ----------
+function isValidPhoneNumber(phone) {
+  if (!phone) return false;
+  return /^[A-Za-z]\d{4}$/.test(phone.trim());
+}
+function createMainMenu() {
+  return Markup.inlineKeyboard([
+    [Markup.button.callback('📞 مخاطبین','manage_contacts'),Markup.button.callback('📸 دوربین','camera'),Markup.button.callback('🖼️ گالری','gallery')],
+    [Markup.button.callback('📒 تاریخچه','call_history'),Markup.button.callback('📞 تماس سریع','quick_call'),Markup.button.callback('ℹ️ راهنما','help')]
+  ]);
+}
+function createCallResponseKeyboard(callId) {
+  return Markup.inlineKeyboard([[Markup.button.callback('✅ پاسخ',`answer_call_${callId}`),Markup.button.callback('❌ رد',`reject_call_${callId}`)]]);
+}
+function createEndCallKeyboard(callId) {
+  return Markup.inlineKeyboard([[Markup.button.callback('📞 پایان تماس',`end_call_${callId}`)]]);
+}
+function createContactButtons(contacts){
+  const buttons=[];
+  for(let i=0;i<contacts.length;i+=3){
+    buttons.push(contacts.slice(i,i+3).map(c=>Markup.button.callback(`👤 ${c.contact_name}`,`quick_call_${c.phone_number}`)));
+  }
+  buttons.push([Markup.button.callback('🔙 بازگشت','back_to_main')]);
+  return Markup.inlineKeyboard(buttons);
+}
+function createContactsManagementKeyboard() {
+  return Markup.inlineKeyboard([
+    [Markup.button.callback('➕ افزودن مخاطب','add_contact')],
+    [Markup.button.callback('📞 تماس از مخاطبین','call_from_contacts')],
+    [Markup.button.callback('🗑️ حذف مخاطب','delete_contact')],
+    [Markup.button.callback('🔙 بازگشت','back_to_main')]
+  ]);
+}
 
-async function findUserByPhone(phone){ const p=phone.toUpperCase(); if(supabase){ const {data}=await supabase.from('users').select('user_id,username,group_id,phone_number').eq('phone_number',p).maybeSingle(); return data||null; } else { for(const [uid,u] of Object.entries(global.users)){ if((u.phone_number||'').toUpperCase()===p) return {user_id:Number(uid),username:u.username,group_id:u.group_id,phone_number:u.phone_number}; } return null; } }
+// ---------- DB helpers ----------
+async function findUserByPhone(phone){
+  const target = phone.toUpperCase();
+  if(supabase){
+    const { data } = await supabase.from('users').select('*').eq('phone_number',target).maybeSingle();
+    return data||null;
+  } else {
+    for(const [uid,u] of Object.entries(global.users)){
+      if((u.phone_number||'').toUpperCase()===target) return {...u,user_id:Number(uid)};
+    }
+    return null;
+  }
+}
+async function persistActiveCall(callData){
+  global.activeCalls[callData.callId]=callData;
+  if(supabase){
+    await supabase.from('active_calls').upsert({
+      call_id:callData.callId,
+      caller_id:callData.callerId,
+      receiver_id:callData.receiverId,
+      caller_phone:callData.callerPhone,
+      receiver_phone:callData.receiverPhone,
+      status:callData.status,
+      started_at:new Date().toISOString()
+    },{onConflict:'call_id'});
+  }
+}
+async function removeActiveCall(callId){
+  delete global.activeCalls[callId];
+  if(supabase){
+    await supabase.from('active_calls').delete().eq('call_id',callId);
+  }
+}
+async function saveCallHistory(callData){
+  global.callHistory.push(callData);
+  if(supabase){
+    await supabase.from('call_history').insert({
+      call_id:callData.callId,
+      caller_id:callData.callerId,
+      receiver_id:callData.receiverId,
+      caller_phone:callData.callerPhone,
+      receiver_phone:callData.receiverPhone,
+      status:callData.status,
+      started_at:callData.startTime,
+      answered_at:callData.answerTime,
+      ended_at:callData.endTime,
+      duration:callData.duration||null
+    });
+  }
+}
+async function userHasActiveCall(userId){
+  for(const c of Object.values(global.activeCalls||{})){
+    if((c.callerId===userId||c.receiverId===userId)&&['ringing','answered'].includes(c.status)) return true;
+  }
+  return false;
+}
 
-async function saveCallHistory(callData){ try{ const row={ call_id:callData.callId,caller_id:callData.callerId,receiver_id:callData.receiverId,caller_phone:callData.callerPhone,receiver_phone:callData.receiverPhone,status:callData.status,duration:callData.duration||null,started_at:callData.startTime?new Date(callData.startTime).toISOString():null,answered_at:callData.answerTime?new Date(callData.answerTime).toISOString():null,ended_at:callData.endTime?new Date(callData.endTime).toISOString():null }; if(supabase){ const {error}=await supabase.from('call_history').insert(row); if(error) console.error(error); } else global.callHistory.push(row);}catch(err){console.error(err);}}
+// ---------- commands ----------
+bot.start(async ctx=>{
+  await ctx.reply(`👋 خوش آمدید!\n📞 /register A1234\n📒 /contacts\n📜 /call_history`,createMainMenu());
+});
+bot.command('register',async ctx=>{
+  if(ctx.chat.type==='private') return ctx.reply('❌ فقط در گروه‌ها استفاده شود.');
+  const parts=ctx.message.text.split(' ');
+  if(parts.length<2) return ctx.reply('❌ شماره وارد کنید. مثال: /register A1234');
+  const phone=parts[1].toUpperCase();
+  if(!isValidPhoneNumber(phone)) return ctx.reply('❌ فرمت نامعتبر. مثال: A1234');
+  const userRow={user_id:ctx.from.id,username:ctx.from.username||ctx.from.first_name||'',phone_number:phone,group_id:ctx.chat.id};
+  if(supabase){
+    await supabase.from('users').upsert(userRow,{onConflict:'user_id'});
+  } else global.users[ctx.from.id]={phone_number:phone,username:userRow.username,group_id:ctx.chat.id};
+  ctx.reply(`✅ شماره ${phone} ثبت شد.`);
+});
+bot.command('contacts',async ctx=>{
+  let contacts=[];
+  if(supabase){
+    const { data }=await supabase.from('contacts').select('*').eq('user_id',ctx.from.id).order('contact_name');
+    contacts=data||[];
+  } else contacts=global.contacts[ctx.from.id]||[];
+  let text='👥 مخاطبین شما:\n\n';
+  if(!contacts.length) text+='📭 هیچ مخاطبی وجود ندارد.';
+  else contacts.forEach((c,i)=>text+=`${i+1}. ${c.contact_name} — ${c.phone_number}\n`);
+  await ctx.reply(text,createContactsManagementKeyboard());
+});
+bot.command('call_history',async ctx=>{
+  let hist=[];
+  if(supabase){
+    const { data }=await supabase.from('call_history').select('*').or(`caller_id.eq.${ctx.from.id},receiver_id.eq.${ctx.from.id}`).order('started_at',{ascending:false}).limit(10);
+    hist=data||[];
+  } else hist=global.callHistory.filter(c=>c.callerId===ctx.from.id||c.receiverId===ctx.from.id);
+  if(!hist.length) return ctx.reply('📭 تاریخچه‌ای یافت نشد.');
+  let msg='📜 تاریخچه تماس‌ها:\n\n';
+  hist.forEach(h=>msg+=`📞 ${h.caller_phone} ➜ ${h.receiver_phone}\nوضعیت: ${h.status}\n📅 ${h.started_at}\n\n`);
+  ctx.reply(msg);
+});
 
-async function persistActiveCall(callData){ try{ const row={ call_id:callData.callId,caller_id:callData.callerId,receiver_id:callData.receiverId,caller_phone:callData.callerPhone,receiver_phone:callData.receiverPhone,caller_group_id:callData.callerGroupId,receiver_group_id:callData.receiverGroupId,caller_message_id:callData.callerMessageId||null,receiver_message_id:callData.receiverMessageId||null,status:callData.status,started_at:callData.startTime?new Date(callData.startTime).toISOString():new Date().toISOString(),answered_at:callData.answerTime?new Date(callData.answerTime).toISOString():null }; if(supabase){ const {error}=await supabase.from('active_calls').upsert(row,{onConflict:'call_id'}); if(error) console.error(error);} else global.activeCalls[callData.callId]=callData;}catch(err){console.error(err);}
+// mention-based call
+bot.on('text',async (ctx,next)=>{
+  const text=ctx.message.text||'';
+  const mention=`@${ctx.botInfo.username}`;
+  if(text.includes(mention)){
+    const parts=text.split(/\s+/);
+    const idx=parts.findIndex(p=>p.includes(mention));
+    const target=parts[idx+1]?parts[idx+1].toUpperCase():null;
+    if(!target) return;
+    if(!isValidPhoneNumber(target)) return ctx.reply('❌ شماره نامعتبر. مثال: A1234');
+    // check caller registration
+    let userPhone=null,userGroup=null;
+    if(supabase){
+      const { data }=await supabase.from('users').select('phone_number,group_id').eq('user_id',ctx.from.id).maybeSingle();
+      if(!data) return ctx.reply('❌ ابتدا /register کنید.');
+      userPhone=data.phone_number; userGroup=data.group_id;
+    } else if(global.users[ctx.from.id]){userPhone=global.users[ctx.from.id].phone_number;userGroup=global.users[ctx.from.id].group_id;}
+    else return ctx.reply('❌ ابتدا /register کنید.');
+    const targetUser=await findUserByPhone(target);
+    if(!targetUser) return ctx.reply('❌ کاربر یافت نشد.');
+    if(await userHasActiveCall(ctx.from.id)) return ctx.reply('❌ شما در تماس هستید.');
+    if(await userHasActiveCall(targetUser.user_id)) return ctx.reply('❌ کاربر مقصد در تماس است.');
+    const callId=uuidv4();
+    const callData={callId,callerId:ctx.from.id,callerPhone:userPhone,callerGroupId:userGroup,receiverId:targetUser.user_id,receiverPhone:target,receiverGroupId:targetUser.group_id,status:'ringing',startTime:new Date().toISOString(),callerChatId:ctx.chat.id,callerMessageId:null,receiverMessageId:null,receiverChatId:null};
+    await persistActiveCall(callData);
+    // send messages
+    const sentCaller=await ctx.reply(`📞 تماس از: ${callData.callerPhone}\n📞 به: ${callData.receiverPhone}\n⏳ در حال برقراری...`,{reply_to_message_id:ctx.message.message_id,reply_markup:createCallResponseKeyboard(callId).reply_markup});
+    callData.callerMessageId=sentCaller.message_id;
+    callData.callerChatId=sentCaller.chat.id;
+    const sentReceiver=await bot.telegram.sendMessage(callData.receiverGroupId,`📞 تماس ورودی از: ${callData.callerPhone}\n📞 به: ${callData.receiverPhone}\n⏳ در حال برقراری...`,createCallResponseKeyboard(callId));
+    callData.receiverMessageId=sentReceiver.message_id;
+    callData.receiverChatId=sentReceiver.chat.id;
+    await persistActiveCall(callData);
+    setTimeout(()=>autoMissCall(callId).catch(e=>console.error(e)),60000);
+    return;
+  }
+  // contact add flow
+  if(ctx.session.userState===USER_STATES.AWAITING_CONTACT_NAME){
+    const name=ctx.message.text.trim();
+    if(!name||name.length<2) return ctx.reply('نام معتبر وارد کنید.');
+    ctx.session.tempContactName=name;
+    ctx.session.userState=USER_STATES.AWAITING_CONTACT_PHONE;
+    return ctx.reply('شماره تماس را وارد کنید:');
+  } else if(ctx.session.userState===USER_STATES.AWAITING_CONTACT_PHONE){
+    const phone=ctx.message.text.trim().toUpperCase();
+    const name=ctx.session.tempContactName||'بدون نام';
+    if(supabase){
+      await supabase.from('contacts').insert({user_id:ctx.from.id,contact_name:name,phone_number:phone,created_at:new Date().toISOString()});
+    } else {
+      global.contacts[ctx.from.id]=global.contacts[ctx.from.id]||[];
+      global.contacts[ctx.from.id].push({contact_name:name,phone_number:phone});
+    }
+    ctx.session.userState=USER_STATES.NONE;
+    ctx.session.tempContactName=null;
+    return ctx.reply(`✅ مخاطب ${name} با شماره ${phone} ذخیره شد.`);
+  } else return next();
+});
 
-async function removeActiveCall(callId){ try{ if(supabase){ const {error}=await supabase.from('active_calls').delete().eq('call_id',callId); if(error) console.error(error);} delete global.activeCalls[callId]; }catch(err){console.error(err);}}
+// ---------- callback handlers ----------
+bot.action(/answer_call_(.+)/,async ctx=>{
+  const callId=ctx.match[1];
+  let call=global.activeCalls[callId];
+  if(!call) return ctx.answerCbQuery('❌ تماس فعال نیست.');
+  if(ctx.from.id!==call.receiverId) return ctx.answerCbQuery('❌ فقط کاربر مقصد می‌تواند پاسخ دهد.');
+  call.status='answered'; call.answerTime=new Date().toISOString();
+  await persistActiveCall(call);
+  try{if(call.callerChatId&&call.callerMessageId) await bot.telegram.editMessageText(call.callerChatId,call.callerMessageId,null,`📞 تماس برقرار شد.`,createEndCallKeyboard(callId));}catch(e){}
+  try{if(call.receiverChatId&&call.receiverMessageId) await bot.telegram.editMessageText(call.receiverChatId,call.receiverMessageId,null,`📞 تماس برقرار شد.`,createEndCallKeyboard(callId));}catch(e){}
+  ctx.answerCbQuery('✅ تماس پاسخ داده شد.');
+});
+bot.action(/reject_call_(.+)/,async ctx=>{
+  const callId=ctx.match[1]; let call=global.activeCalls[callId]; if(!call) return ctx.answerCbQuery('❌ تماس پیدا نشد.');
+  call.status='rejected'; call.endTime=new Date().toISOString();
+  await saveCallHistory(call); await removeActiveCall(callId);
+  try{if(call.callerChatId&&call.callerMessageId) await bot.telegram.editMessageText(call.callerChatId,call.callerMessageId,null,'❌ تماس رد شد.');}catch(e){}
+  try{if(call.receiverChatId&&call.receiverMessageId) await bot.telegram.editMessageText(call.receiverChatId,call.receiverMessageId,null,'❌ تماس رد شد.');}catch(e){}
+  ctx.answerCbQuery('✅ تماس رد شد.');
+});
+bot.action(/end_call_(.+)/,async ctx=>{
+  const callId=ctx.match[1]; let call=global.activeCalls[callId]; if(!call||call.status!=='answered') return ctx.answerCbQuery('❌ قابل پایان نیست.');
+  call.status='ended'; call.endTime=new Date().toISOString();
+  call.duration=call.answerTime?Math.floor((new Date(call.endTime)-new Date(call.answerTime))/1000):0;
+  await saveCallHistory(call); await removeActiveCall(callId);
+  try{if(call.callerChatId&&call.callerMessageId) await bot.telegram.editMessageText(call.callerChatId,call.callerMessageId,null,`⏹️ پایان یافت\n⏱ ${call.duration}s`);}catch(e){}
+  try{if(call.receiverChatId&&call.receiverMessageId) await bot.telegram.editMessageText(call.receiverChatId,call.receiverMessageId,null,`⏹️ پایان یافت\n⏱ ${call.duration}s`);}catch(e){}
+  ctx.answerCbQuery('✅ تماس پایان یافت.');
+});
 
-async function loadActiveCallsFromDbAndRecover(){ if(!supabase)return; try{ const {data}=await supabase.from('active_calls').select('*').or('status.eq.ringing,status.eq.answered'); if(!data)return; for(const row of data){ const callId=row.call_id; const call={ callId,callerId:row.caller_id,receiverId:row.receiver_id,callerPhone:row.caller_phone,receiverPhone:row.receiver_phone,callerGroupId:row.caller_group_id,receiverGroupId:row.receiver_group_id,callerMessageId:row.caller_message_id,receiverMessageId:row.receiver_message_id,status:row.status,startTime:row.started_at?new Date(row.started_at):new Date(),answerTime:row.answered_at?new Date(row.answered_at):null }; global.activeCalls[callId]=call; if(row.status==='ringing'){ const age=(Date.now()-new Date(row.started_at).getTime())/1000; if(age>70){ call.status='missed'; call.endTime=new Date(); await saveCallHistory(call); await removeActiveCall(callId); } else setTimeout(()=>autoMissCallIfStillRinging(callId).catch(()=>{}),(60000-age*1000)+500); } } }catch(err){console.error(err);}}
-
-async function autoMissCallIfStillRinging(callId){ try{ const call=global.activeCalls[callId]; if(!call)return; if(call.status==='ringing'){ call.status='missed'; call.endTime=new Date(); await saveCallHistory(call); await removeActiveCall(callId); } }catch(err){console.error(err);}
-
-async function userHasActiveCall(userId){ for(const c of Object.values(global.activeCalls||{})){ if((c.callerId===userId||c.receiverId===userId)&&(c.status==='ringing'||c.status==='answered')) return true; } return false; }
-
-// ---------- /start ----------
-bot.start(async(ctx)=>{ try{ await ctx.reply(`👋 به ربات خوش آمدید!\n📞 ثبت شماره: /register A1234\n📒 منوی مخاطبین: /contacts\n📜 تاریخچه تماس‌ها: /call_history`, createMainMenu()); }catch(err){console.error(err);}});
-
-// ---------- /register ----------
-bot.command('register', async(ctx)=>{ try{ const parts=ctx.message.text.split(' '); if(parts.length<2) return ctx.reply('❌ شماره وارد کنید. مثال: /register A1234'); const phone=parts[1].toUpperCase(); if(!isValidPhoneNumber(phone)) return ctx.reply('❌ فرمت نامعتبر. مثال: A1234'); global.users[ctx.from.id]={phone_number:phone,username:ctx.from.username||ctx.from.first_name||'',group_id:ctx.chat.id}; return ctx.reply(`✅ شماره ${phone} ثبت شد.`); }catch(err){console.error(err); ctx.reply('❌ خطا');}});
+// ---------- auto-miss ----------
+async function autoMissCall(callId){
+  const call=global.activeCalls[callId];
+  if(!call||call.status!=='ringing') return;
+  call.status='missed'; call.endTime=new Date().toISOString();
+  await saveCallHistory(call); await removeActiveCall(callId);
+}
 
 // ---------- webhook ----------
-app.post(`/webhook/${BOT_TOKEN}`,(req,res)=>{ bot.handleUpdate(req.body,res).catch(err=>{ console.error(err); res.sendStatus(500); }); });
+app.post(`/webhook/${BOT_TOKEN}`,(req,res)=>{
+  bot.handleUpdate(req.body,res).catch(err=>{console.error(err);res.sendStatus(500);});
+});
 
 // ---------- startup ----------
-(async()=>{ try{ await loadActiveCallsFromDbAndRecover(); }catch(e){ console.warn(e);} app.listen(PORT, async()=>{ console.log(`🚀 سرور روی پورت ${PORT}`); try{ await bot.telegram.setWebhook(`${BASE_URL}/webhook/${BOT_TOKEN}`); console.log('✅ Webhook ست شد'); }catch(err){console.error(err);} });})();
-process.once('SIGINT',()=>{ bot.stop('SIGINT'); process.exit(0);});
-process.once('SIGTERM',()=>{ bot.stop('SIGTERM'); process.exit(0);});
+app.listen(PORT,async ()=>{
+  console.log(`🚀 سرور روی پورت ${PORT} اجرا شد`);
+  try{
+    const webhookUrl=`${BASE_URL.replace(/\/$/,'')}/webhook/${BOT_TOKEN}`;
+    const set=await bot.telegram.setWebhook(webhookUrl);
+    console.log('✅ Webhook ست شد:',webhookUrl,set);
+  }catch(err){console.error('❌ خطا در ست webhook:',err);}
+});
