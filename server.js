@@ -419,7 +419,7 @@ async function autoMissCall(callId){
         if(call.receiverChatId && call.receiverMessageId)
             await bot.telegram.editMessageText(call.receiverChatId, call.receiverMessageId, null, '❌ تماس بی‌پاسخ ماند.');
     } catch(e){}
-});
+};
 // ---------- webhook ----------
 app.post(`/webhook/${BOT_TOKEN}`, (req, res) => {
     bot.handleUpdate(req.body, res).catch(err => {
