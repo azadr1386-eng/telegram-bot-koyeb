@@ -1,14 +1,187 @@
+/**
+ * full-featured Telegram call-bot (webhook-only)
+ * قابلیت‌ها:
+ * - تماس با mention یا تماس سریع
+ * - مدیریت مخاطبین
+ * - گالری عکس و فیلم
+ * - ریپلای بین گروه‌ها
+ * - persist با Supabase یا حافظه
+ */
+
+const { Telegraf, Markup, session } = require('telegraf');
+const express = require('express');
+const { v4: uuidv4 } = require('uuid');
+const { createClient } = require('@supabase/supabase-js');
+require('dotenv').config();
+
+// ---------- config ----------
+const BOT_TOKEN = process.env.BOT_TOKEN;
+const BASE_URL = process.env.BASE_URL;
+const PORT = process.env.PORT || 3000;
+
+if (!BOT_TOKEN) { console.error('❌ BOT_TOKEN تنظیم نشده'); process.exit(1); }
+if (!BASE_URL) { console.error('❌ BASE_URL تنظیم نشده'); process.exit(1); }
+
+// ---------- Supabase client (optional) ----------
+let supabase = null;
+if (process.env.SUPABASE_URL && process.env.SUPABASE_ANON_KEY) {
+    supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_ANON_KEY);
+    console.log('✅ Supabase متصل شد');
+} else console.warn('⚠️ Supabase تنظیم نشده — از حافظه محلی استفاده می‌شود.');
+
+// ---------- memory fallback ----------
+global.users = global.users || {};
+global.contacts = global.contacts || {};
+global.activeCalls = global.activeCalls || {};
+global.callHistory = global.callHistory || [];
+global.gallery = global.gallery || { PHOTO: [], FILM: [] };
+
+// ---------- bot & server ----------
+const bot = new Telegraf(BOT_TOKEN);
+const app = express();
+app.use(express.json());
+
 // ---------- session و وضعیت کاربر ----------
 bot.use(session({
     defaultSession: () => ({
         userState: 'none',
         tempContactName: null,
-        tempPhotoLinks: [],   // برای ذخیره موقت لینک‌ها
-        tempFilmLinks: []
+        tempPhotoLinks: [],
+        tempFilmLinks: [],
+        tempMessages: [],
+        galleryType: null,
+        awaitingGalleryType: null,
+        filmMessages: []
     })
 }));
 
-// ---------- دستورات ثبت مخاطب ----------
+// ---------- constants ----------
+const USER_STATES = {
+    NONE: 'none',
+    AWAITING_CONTACT_NAME: 'awaiting_contact_name',
+    AWAITING_CONTACT_PHONE: 'awaiting_contact_phone'
+};
+
+// ---------- helpers ----------
+function isValidPhoneNumber(phone) {
+    if (!phone) return false;
+    return /^[A-Za-z]\d{4}$/.test(phone.trim());
+}
+
+function createMainMenu() {
+    return Markup.inlineKeyboard([
+        [Markup.button.callback('📞 مخاطبین','manage_contacts'),
+         Markup.button.callback('📸 دوربین','camera'),
+         Markup.button.callback('🖼️ گالری','gallery')],
+        [Markup.button.callback('📒 تاریخچه','call_history'),
+         Markup.button.callback('📞 تماس سریع','quick_call'),
+         Markup.button.callback('ℹ️ راهنما','help')]
+    ]);
+}
+
+function createCallResponseKeyboard(callId) {
+    return Markup.inlineKeyboard([
+        [Markup.button.callback('✅ پاسخ',`answer_call_${callId}`),
+         Markup.button.callback('❌ رد',`reject_call_${callId}`)]
+    ]);
+}
+
+function createEndCallKeyboard(callId) {
+    return Markup.inlineKeyboard([
+        [Markup.button.callback('📞 پایان تماس',`end_call_${callId}`)]
+    ]);
+}
+
+function createContactsManagementKeyboard() {
+    return Markup.inlineKeyboard([
+        [Markup.button.callback('➕ افزودن مخاطب','add_contact')],
+        [Markup.button.callback('📞 تماس از مخاطبین','call_from_contacts')],
+        [Markup.button.callback('🗑️ حذف مخاطب','delete_contact')],
+        [Markup.button.callback('🔙 بازگشت','back_to_main')]
+    ]);
+}
+
+async function findUserByPhone(phone){
+    const target = phone.toUpperCase();
+    if(supabase){
+        const { data } = await supabase.from('users').select('*').eq('phone_number',target).maybeSingle();
+        return data || null;
+    } else {
+        for(const [uid,u] of Object.entries(global.users)){
+            if((u.phone_number||'').toUpperCase()===target) return {...u,user_id:Number(uid)};
+        }
+        return null;
+    }
+}
+
+async function persistActiveCall(callData){
+    global.activeCalls[callData.callId] = callData;
+    if(supabase){
+        await supabase.from('active_calls').upsert({
+            call_id: callData.callId,
+            caller_id: callData.callerId,
+            receiver_id: callData.receiverId,
+            caller_phone: callData.callerPhone,
+            receiver_phone: callData.receiverPhone,
+            status: callData.status,
+            started_at: new Date().toISOString()
+        }, { onConflict: 'call_id' });
+    }
+}
+
+async function removeActiveCall(callId){
+    delete global.activeCalls[callId];
+    if(supabase){
+        await supabase.from('active_calls').delete().eq('call_id',callId);
+    }
+}
+
+async function saveCallHistory(callData){
+    global.callHistory.push(callData);
+    if(supabase){
+        await supabase.from('call_history').insert({
+            call_id: callData.callId,
+            caller_id: callData.callerId,
+            receiver_id: callData.receiverId,
+            caller_phone: callData.callerPhone,
+            receiver_phone: callData.receiverPhone,
+            status: callData.status,
+            started_at: callData.startTime,
+            answered_at: callData.answerTime,
+            ended_at: callData.endTime,
+            duration: callData.duration || null
+        });
+    }
+}
+
+async function userHasActiveCall(userId){
+    for(const c of Object.values(global.activeCalls||{})){
+        if((c.callerId===userId||c.receiverId===userId)&&['ringing','answered'].includes(c.status)) return true;
+    }
+    return false;
+}
+// ---------- ثبت شماره کاربر ----------
+bot.command('register', async ctx => {
+    const args = ctx.message.text.split(' ').slice(1);
+    if(!args.length) return ctx.reply('❌ مثال صحیح: /register A1234');
+    const phone = args[0].toUpperCase();
+
+    if(!isValidPhoneNumber(phone)) return ctx.reply('❌ شماره نامعتبر است. مثال: A1234');
+
+    if(supabase){
+        await supabase.from('users').upsert({
+            user_id: ctx.from.id,
+            phone_number: phone,
+            group_id: ctx.chat.id
+        }, { onConflict: 'user_id' });
+    } else {
+        global.users[ctx.from.id] = { phone_number: phone, group_id: ctx.chat.id };
+    }
+
+    return ctx.reply(`✅ شماره شما ثبت شد: ${phone}`);
+});
+
+// ---------- نمایش مخاطبین ----------
 bot.command('contacts', async ctx => {
     let contacts = [];
     if(supabase){
@@ -23,7 +196,13 @@ bot.command('contacts', async ctx => {
     await ctx.reply(text, createContactsManagementKeyboard());
 });
 
-// ---------- جریان افزودن مخاطب ----------
+// ---------- افزودن مخاطب ----------
+bot.action('add_contact', async ctx => {
+    ctx.session.userState = USER_STATES.AWAITING_CONTACT_NAME;
+    await ctx.reply('📥 لطفاً نام مخاطب را وارد کنید:');
+    ctx.answerCbQuery();
+});
+
 bot.on('text', async ctx => {
     if(ctx.session.userState === USER_STATES.AWAITING_CONTACT_NAME){
         const name = ctx.message.text.trim();
@@ -32,9 +211,11 @@ bot.on('text', async ctx => {
         ctx.session.userState = USER_STATES.AWAITING_CONTACT_PHONE;
         return ctx.reply('شماره تماس را وارد کنید:');
     }
+
     if(ctx.session.userState === USER_STATES.AWAITING_CONTACT_PHONE){
         const phone = ctx.message.text.trim().toUpperCase();
         const name = ctx.session.tempContactName || 'بدون نام';
+
         if(supabase){
             await supabase.from('contacts').insert({
                 user_id: ctx.from.id,
@@ -46,12 +227,56 @@ bot.on('text', async ctx => {
             global.contacts[ctx.from.id] = global.contacts[ctx.from.id]||[];
             global.contacts[ctx.from.id].push({contact_name: name, phone_number: phone});
         }
+
         ctx.session.userState = USER_STATES.NONE;
         ctx.session.tempContactName = null;
         return ctx.reply(`✅ مخاطب ${name} با شماره ${phone} ذخیره شد.`);
     }
 });
-// ---------- ایجاد تماس mention-based ----------
+
+// ---------- حذف مخاطب ----------
+bot.action('delete_contact', async ctx => {
+    let contacts = global.contacts[ctx.from.id] || [];
+    if(supabase){
+        const { data } = await supabase.from('contacts').select('*').eq('user_id', ctx.from.id);
+        contacts = data || [];
+    }
+    if(!contacts.length) return ctx.reply('📭 هیچ مخاطبی وجود ندارد.');
+    const buttons = contacts.map(c => [Markup.button.callback(`🗑️ ${c.contact_name}`, `del_contact_${c.phone_number}`)]);
+    buttons.push([Markup.button.callback('🔙 بازگشت', 'back_to_main')]);
+    await ctx.reply('🗑️ کدام مخاطب را حذف می‌کنید؟', Markup.inlineKeyboard(buttons));
+    ctx.answerCbQuery();
+});
+
+bot.action(/del_contact_(.+)/, async ctx => {
+    const phone = ctx.match[1];
+    if(supabase){
+        await supabase.from('contacts').delete().eq('user_id', ctx.from.id).eq('phone_number', phone);
+    } else {
+        global.contacts[ctx.from.id] = (global.contacts[ctx.from.id]||[]).filter(c=>c.phone_number !== phone);
+    }
+    await ctx.reply(`✅ مخاطب با شماره ${phone} حذف شد.`);
+    ctx.answerCbQuery();
+});
+
+// ---------- تاریخچه تماس ----------
+bot.command('call_history', async ctx => {
+    let history = [];
+    if(supabase){
+        const { data } = await supabase.from('call_history').select('*').or(`caller_id.eq.${ctx.from.id},receiver_id.eq.${ctx.from.id}`).order('started_at', { ascending: false });
+        history = data || [];
+    } else {
+        history = global.callHistory.filter(c=>c.callerId===ctx.from.id||c.receiverId===ctx.from.id);
+    }
+
+    if(!history.length) return ctx.reply('📭 تاریخچه‌ای موجود نیست.');
+    let msg = '📒 تاریخچه تماس‌ها:\n\n';
+    history.slice(0,20).forEach(c=>{
+        msg += `📞 ${c.callerPhone} → ${c.receiverPhone} | ${c.status.toUpperCase()} | ⏱ ${c.duration||0}s\n`;
+    });
+    await ctx.reply(msg);
+});
+// ---------- تماس mention-based ----------
 bot.on('text', async (ctx, next) => {
     const text = ctx.message.text || '';
     const mention = `@${ctx.botInfo.username}`;
@@ -78,7 +303,6 @@ bot.on('text', async (ctx, next) => {
     if(await userHasActiveCall(ctx.from.id)) return ctx.reply('❌ شما در تماس هستید.');
     if(await userHasActiveCall(targetUser.user_id)) return ctx.reply('❌ کاربر مقصد در تماس است.');
 
-    // ایجاد شناسه تماس
     const callId = uuidv4();
     const callData = {
         callId,
@@ -95,9 +319,10 @@ bot.on('text', async (ctx, next) => {
         receiverChatId: null,
         receiverMessageId: null
     };
+
     await persistActiveCall(callData);
 
-    // ارسال پیام به تماس گیرنده
+    // پیام به تماس گیرنده
     const sentCaller = await ctx.reply(
         `📞 تماس از: ${callData.callerPhone}\n📞 به: ${callData.receiverPhone}\n⏳ در حال برقراری...`,
         { reply_to_message_id: ctx.message.message_id, reply_markup: createCallResponseKeyboard(callId).reply_markup }
@@ -105,7 +330,7 @@ bot.on('text', async (ctx, next) => {
     callData.callerMessageId = sentCaller.message_id;
     callData.callerChatId = sentCaller.chat.id;
 
-    // ارسال پیام به کاربر مقصد
+    // پیام به کاربر مقصد
     const sentReceiver = await bot.telegram.sendMessage(
         callData.receiverGroupId,
         `📞 تماس ورودی از: ${callData.callerPhone}\n📞 به: ${callData.receiverPhone}\n⏳ در حال برقراری...`,
@@ -120,7 +345,7 @@ bot.on('text', async (ctx, next) => {
 // ---------- پاسخ تماس ----------
 bot.action(/answer_call_(.+)/, async ctx => {
     const callId = ctx.match[1];
-    let call = global.activeCalls[callId];
+    const call = global.activeCalls[callId];
     if(!call) return ctx.answerCbQuery('❌ تماس فعال نیست.');
     if(ctx.from.id !== call.receiverId) return ctx.answerCbQuery('❌ فقط کاربر مقصد می‌تواند پاسخ دهد.');
 
@@ -128,21 +353,19 @@ bot.action(/answer_call_(.+)/, async ctx => {
     call.answerTime = new Date().toISOString();
     await persistActiveCall(call);
 
-    // بروزرسانی پیام‌ها و اضافه کردن دکمه پایان تماس
-    if(call.callerChatId && call.callerMessageId){
+    if(call.callerChatId && call.callerMessageId)
         await bot.telegram.editMessageText(
             call.callerChatId, call.callerMessageId, null,
             `📞 تماس برقرار شد.`,
             createEndCallKeyboard(callId)
         );
-    }
-    if(call.receiverChatId && call.receiverMessageId){
+
+    if(call.receiverChatId && call.receiverMessageId)
         await bot.telegram.editMessageText(
             call.receiverChatId, call.receiverMessageId, null,
             `📞 تماس برقرار شد.`,
             createEndCallKeyboard(callId)
         );
-    }
 
     ctx.answerCbQuery('✅ تماس پاسخ داده شد.');
 });
@@ -150,7 +373,7 @@ bot.action(/answer_call_(.+)/, async ctx => {
 // ---------- رد تماس ----------
 bot.action(/reject_call_(.+)/, async ctx => {
     const callId = ctx.match[1];
-    let call = global.activeCalls[callId];
+    const call = global.activeCalls[callId];
     if(!call) return ctx.answerCbQuery('❌ تماس فعال نیست.');
 
     call.status = 'rejected';
@@ -166,10 +389,10 @@ bot.action(/reject_call_(.+)/, async ctx => {
     ctx.answerCbQuery('✅ تماس رد شد.');
 });
 
-// ---------- پایان تماس توسط کاربر ----------
+// ---------- پایان تماس ----------
 bot.action(/end_call_(.+)/, async ctx => {
     const callId = ctx.match[1];
-    let call = global.activeCalls[callId];
+    const call = global.activeCalls[callId];
     if(!call || call.status !== 'answered') return ctx.answerCbQuery('❌ قابل پایان نیست.');
 
     call.status = 'ended';
@@ -185,32 +408,53 @@ bot.action(/end_call_(.+)/, async ctx => {
 
     ctx.answerCbQuery('✅ تماس پایان یافت.');
 });
-// ---------- ریپلای پیام بین گروه‌ها ----------
-bot.on('message', async (ctx, next) => {
-    const reply = ctx.message.reply_to_message;
-    if(reply){
-        // بررسی اینکه پیام reply مربوط به تماس باشد
-        const callEntry = Object.values(global.activeCalls).find(c =>
-            (c.callerMessageId === reply.message_id && c.callerChatId === ctx.chat.id) ||
-            (c.receiverMessageId === reply.message_id && c.receiverChatId === ctx.chat.id)
-        );
 
-        if(callEntry){
-            // تعیین مقصد پیام
-            let destChatId = null;
-            if(callEntry.callerMessageId === reply.message_id) destChatId = callEntry.receiverChatId;
-            else if(callEntry.receiverMessageId === reply.message_id) destChatId = callEntry.callerChatId;
+// ---------- تماس سریع (quick call) ----------
+bot.action(/quick_call_(.+)/, async ctx => {
+    const phone = ctx.match[1];
+    const callerId = ctx.from.id;
 
-            if(destChatId){
-                // ارسال پیام به گروه مقصد
-                await bot.telegram.sendMessage(destChatId, `📩 پیام ریپلای شده از ${ctx.from.first_name}:\n${ctx.message.text || ''}`);
-                return;
-            }
-        }
-    }
-    return next();
+    const targetUser = await findUserByPhone(phone);
+    if(!targetUser) return ctx.reply('❌ کاربر یافت نشد.');
+    if(await userHasActiveCall(callerId)) return ctx.reply('❌ شما در تماس هستید.');
+    if(await userHasActiveCall(targetUser.user_id)) return ctx.reply('❌ کاربر مقصد در تماس است.');
+
+    const callId = uuidv4();
+    const callData = {
+        callId,
+        callerId,
+        callerPhone: global.users[callerId]?.phone_number || '',
+        callerGroupId: global.users[callerId]?.group_id || ctx.chat.id,
+        receiverId: targetUser.user_id,
+        receiverPhone: phone,
+        receiverGroupId: targetUser.group_id,
+        status: 'ringing',
+        startTime: new Date().toISOString(),
+        callerChatId: ctx.chat.id,
+        callerMessageId: null,
+        receiverMessageId: null,
+        receiverChatId: null
+    };
+    await persistActiveCall(callData);
+
+    const sentCaller = await ctx.reply(
+        `📞 تماس از: ${callData.callerPhone}\n📞 به: ${callData.receiverPhone}\n⏳ در حال برقراری...`,
+        { reply_markup: createCallResponseKeyboard(callId).reply_markup }
+    );
+    callData.callerMessageId = sentCaller.message_id;
+    callData.callerChatId = sentCaller.chat.id;
+
+    const sentReceiver = await bot.telegram.sendMessage(
+        callData.receiverGroupId,
+        `📞 تماس ورودی از: ${callData.callerPhone}\n📞 به: ${callData.receiverPhone}\n⏳ در حال برقراری...`,
+        createCallResponseKeyboard(callId)
+    );
+    callData.receiverMessageId = sentReceiver.message_id;
+    callData.receiverChatId = sentReceiver.chat.id;
+
+    await persistActiveCall(callData);
+    ctx.answerCbQuery('✅ تماس برقرار شد.');
 });
-
 // ---------- گالری و فیلم ----------
 global.gallery = global.gallery || {}; // user_id => array of {type:'photo'|'film', messages:[...]}
 bot.command('PHOTO', async ctx => {
@@ -222,6 +466,7 @@ bot.command('FILM', async ctx => {
     ctx.session.tempMessages = [];
     return ctx.reply('✅ لینک پیام FILM را ارسال کنید (برای چند پیام جداگانه ارسال کنید):');
 });
+
 bot.on('text', async ctx => {
     if(ctx.session.galleryType === 'photo'){
         const link = ctx.message.text.trim();
@@ -268,183 +513,28 @@ bot.action('camera', async ctx => {
     }
     ctx.answerCbQuery();
 });
-// ---------- مدیریت مخاطبین ----------
-bot.action('manage_contacts', async ctx => {
-    await ctx.reply('📋 مدیریت مخاطبین:', createContactsManagementKeyboard());
-    ctx.answerCbQuery();
-});
 
-bot.action('add_contact', async ctx => {
-    ctx.session.userState = USER_STATES.AWAITING_CONTACT_NAME;
-    await ctx.reply('📥 لطفا نام مخاطب را وارد کنید:');
-    ctx.answerCbQuery();
-});
+// ---------- ریپلای پیام بین گروه‌ها ----------
+bot.on('message', async (ctx, next) => {
+    const reply = ctx.message.reply_to_message;
+    if(reply){
+        const callEntry = Object.values(global.activeCalls).find(c =>
+            (c.callerMessageId === reply.message_id && c.callerChatId === ctx.chat.id) ||
+            (c.receiverMessageId === reply.message_id && c.receiverChatId === ctx.chat.id)
+        );
 
-bot.action('delete_contact', async ctx => {
-    let contacts = global.contacts[ctx.from.id] || [];
-    if(supabase){
-        const { data } = await supabase.from('contacts').select('*').eq('user_id', ctx.from.id);
-        contacts = data || [];
-    }
-    if(!contacts.length) return ctx.reply('📭 هیچ مخاطبی وجود ندارد.');
-    const buttons = contacts.map(c => [Markup.button.callback(`🗑️ ${c.contact_name}`, `del_contact_${c.phone_number}`)]);
-    buttons.push([Markup.button.callback('🔙 بازگشت', 'back_to_main')]);
-    await ctx.reply('🗑️ کدام مخاطب را حذف می‌کنید؟', Markup.inlineKeyboard(buttons));
-    ctx.answerCbQuery();
-});
+        if(callEntry){
+            let destChatId = null;
+            if(callEntry.callerMessageId === reply.message_id) destChatId = callEntry.receiverChatId;
+            else if(callEntry.receiverMessageId === reply.message_id) destChatId = callEntry.callerChatId;
 
-bot.action(/del_contact_(.+)/, async ctx => {
-    const phone = ctx.match[1];
-    if(supabase){
-        await supabase.from('contacts').delete().eq('user_id', ctx.from.id).eq('phone_number', phone);
-    } else {
-        global.contacts[ctx.from.id] = (global.contacts[ctx.from.id]||[]).filter(c=>c.phone_number !== phone);
-    }
-    await ctx.reply(`✅ مخاطب با شماره ${phone} حذف شد.`);
-    ctx.answerCbQuery();
-});
-
-bot.action('call_from_contacts', async ctx => {
-    let contacts = global.contacts[ctx.from.id] || [];
-    if(supabase){
-        const { data } = await supabase.from('contacts').select('*').eq('user_id', ctx.from.id);
-        contacts = data || [];
-    }
-    if(!contacts.length) return ctx.reply('📭 هیچ مخاطبی وجود ندارد.');
-    const buttons = [];
-    for(let i=0; i<contacts.length; i+=3){
-        buttons.push(contacts.slice(i,i+3).map(c => Markup.button.callback(`👤 ${c.contact_name}`, `quick_call_${c.phone_number}`)));
-    }
-    buttons.push([Markup.button.callback('🔙 بازگشت', 'back_to_main')]);
-    await ctx.reply('📞 مخاطبین برای تماس سریع:', Markup.inlineKeyboard(buttons));
-    ctx.answerCbQuery();
-});
-
-bot.action(/quick_call_(.+)/, async ctx => {
-    const targetPhone = ctx.match[1];
-    const callerId = ctx.from.id;
-
-    const targetUser = await findUserByPhone(targetPhone);
-    if(!targetUser) return ctx.reply('❌ کاربر یافت نشد.');
-    if(await userHasActiveCall(callerId)) return ctx.reply('❌ شما در تماس هستید.');
-    if(await userHasActiveCall(targetUser.user_id)) return ctx.reply('❌ کاربر مقصد در تماس است.');
-
-    const callId = uuidv4();
-    const userPhone = global.users[callerId]?.phone_number || 'UNKNOWN';
-    const userGroup = global.users[callerId]?.group_id || ctx.chat.id;
-
-    const callData = {
-        callId,
-        callerId,
-        callerPhone: userPhone,
-        callerGroupId: userGroup,
-        receiverId: targetUser.user_id,
-        receiverPhone: targetPhone,
-        receiverGroupId: targetUser.group_id,
-        status: 'ringing',
-        startTime: new Date().toISOString(),
-        callerChatId: ctx.chat.id,
-        callerMessageId: null,
-        receiverMessageId: null,
-        receiverChatId: null
-    };
-    await persistActiveCall(callData);
-
-    // پیام‌ها
-    const sentCaller = await ctx.reply(
-        `📞 تماس از: ${callData.callerPhone}\n📞 به: ${callData.receiverPhone}\n⏳ در حال برقراری...`,
-        { reply_markup: createCallResponseKeyboard(callId).reply_markup }
-    );
-    callData.callerMessageId = sentCaller.message_id;
-    callData.callerChatId = sentCaller.chat.id;
-
-    const sentReceiver = await bot.telegram.sendMessage(
-        callData.receiverGroupId,
-        `📞 تماس ورودی از: ${callData.callerPhone}\n📞 به: ${callData.receiverPhone}\n⏳ در حال برقراری...`,
-        createCallResponseKeyboard(callId)
-    );
-    callData.receiverMessageId = sentReceiver.message_id;
-    callData.receiverChatId = sentReceiver.chat.id;
-
-    await persistActiveCall(callData);
-    ctx.answerCbQuery('✅ تماس برقرار شد.');
-});
-
-bot.action('back_to_main', async ctx => {
-    await ctx.reply('🏠 منوی اصلی:', createMainMenu());
-    ctx.answerCbQuery();
-});
-// ---------- گالری و دوربین ----------
-bot.action('gallery', async ctx => {
-    await ctx.reply('🖼️ گالری شما:\nبرای اضافه کردن عکس از /PHOTO و برای فیلم /FILM استفاده کنید.');
-    ctx.answerCbQuery();
-});
-
-bot.action('camera', async ctx => {
-    await ctx.reply('📸 دوربین شبیه‌سازی شده (پیام‌ها را می‌توانید ریپلای کنید تا ذخیره شوند).');
-    ctx.answerCbQuery();
-});
-
-// ---------- ذخیره پیام‌ها ----------
-bot.command('PHOTO', async ctx => {
-    ctx.session.awaitingGalleryType = 'PHOTO';
-    await ctx.reply('📌 لینک پیام یا متن را ارسال کنید تا به گالری عکس اضافه شود:');
-});
-
-bot.command('FILM', async ctx => {
-    ctx.session.awaitingGalleryType = 'FILM';
-    ctx.session.filmMessages = [];
-    await ctx.reply('🎬 لینک پیام‌ها یا متن‌ها را یکی‌یکی ارسال کنید. بعد از آخرین پیام /END را بزنید:');
-});
-
-bot.command('END', async ctx => {
-    if(ctx.session.awaitingGalleryType === 'FILM' && ctx.session.filmMessages.length){
-        // ذخیره فیلم در DB یا حافظه
-        global.gallery = global.gallery || { PHOTO: [], FILM: [] };
-        global.gallery.FILM.push([...ctx.session.filmMessages]);
-        ctx.session.filmMessages = [];
-        ctx.session.awaitingGalleryType = null;
-        return ctx.reply('✅ فیلم ذخیره شد.');
-    }
-    ctx.reply('❌ هیچ فیلیمی در حال ثبت وجود ندارد.');
-});
-
-bot.on('text', async ctx => {
-    if(ctx.session.awaitingGalleryType === 'PHOTO'){
-        const text = ctx.message.text;
-        global.gallery = global.gallery || { PHOTO: [], FILM: [] };
-        global.gallery.PHOTO.push(text);
-        ctx.session.awaitingGalleryType = null;
-        return ctx.reply('✅ عکس ذخیره شد.');
-    } else if(ctx.session.awaitingGalleryType === 'FILM'){
-        ctx.session.filmMessages.push(ctx.message.text);
-        return ctx.reply('پیام ثبت شد. پیام بعدی یا /END');
-    }
-});
-
-// ---------- نمایش گالری ----------
-bot.action('gallery', async ctx => {
-    global.gallery = global.gallery || { PHOTO: [], FILM: [] };
-    let msg = '🖼️ گالری:\n\n📷 عکس‌ها:\n';
-    global.gallery.PHOTO.forEach((p,i)=> msg += `${i+1}. ${p}\n`);
-    msg += '\n🎬 فیلم‌ها:\n';
-    global.gallery.FILM.forEach((f,i)=> msg += `${i+1}. ${f.join(' | ')}\n`);
-    await ctx.reply(msg);
-    ctx.answerCbQuery();
-});
-
-// ---------- ریپلای بین گروه‌ها ----------
-bot.on('message', async ctx => {
-    if(ctx.message.reply_to_message){
-        const replyMsg = ctx.message.text || ctx.message.caption || '';
-        // بررسی اینکه پیام reply شده متعلق به تماس باشد
-        const call = Object.values(global.activeCalls).find(c=>c.callerMessageId===ctx.message.reply_to_message.message_id || c.receiverMessageId===ctx.message.reply_to_message.message_id);
-        if(call){
-            // فوروارد پیام به گروه مقصد
-            const targetChatId = ctx.from.id === call.callerId ? call.receiverChatId : call.callerChatId;
-            const sent = await bot.telegram.sendMessage(targetChatId, `💬 ریپلای:\n${replyMsg}`, { reply_to_message_id: ctx.from.id===call.callerId ? call.receiverMessageId : call.callerMessageId });
+            if(destChatId){
+                await bot.telegram.sendMessage(destChatId, `📩 پیام ریپلای شده از ${ctx.from.first_name}:\n${ctx.message.text || ''}`);
+                return;
+            }
         }
     }
+    return next();
 });
 // ---------- مدیریت مخاطبین ----------
 bot.action('manage_contacts', async ctx => {
@@ -461,7 +551,7 @@ bot.action('add_contact', async ctx => {
 bot.action('delete_contact', async ctx => {
     const contacts = global.contacts[ctx.from.id] || [];
     if(!contacts.length) return ctx.reply('📭 هیچ مخاطبی برای حذف وجود ندارد.');
-    const buttons = contacts.map(c=>Markup.button.callback(`❌ ${c.contact_name}`, `delete_contact_${c.phone_number}`));
+    const buttons = contacts.map(c => Markup.button.callback(`❌ ${c.contact_name}`, `delete_contact_${c.phone_number}`));
     buttons.push([Markup.button.callback('🔙 بازگشت','back_to_main')]);
     await ctx.reply('🗑️ مخاطب مورد نظر را برای حذف انتخاب کنید:', Markup.inlineKeyboard(buttons));
     ctx.answerCbQuery();
@@ -523,7 +613,7 @@ bot.action(/quick_call_(.+)/, async ctx => {
     callData.receiverChatId = sentReceiver.chat.id;
 
     await persistActiveCall(callData);
-    ctx.answerCbQuery();
+    ctx.answerCbQuery('✅ تماس برقرار شد.');
 });
 
 // ---------- بازگشت به منو ----------
@@ -543,16 +633,12 @@ bot.action('help', async ctx => {
 - ➕ افزودن مخاطب / 🗑️ حذف مخاطب`);
     ctx.answerCbQuery();
 });
-
-// ---------- گالری / دوربین / فیلم ----------
-// از پارت ۵ استفاده می‌شود
-
-// ---------- ریپلای بین گروه‌ها ----------
-// از پارت ۵ استفاده می‌شود
-
 // ---------- webhook ----------
 app.post(`/webhook/${BOT_TOKEN}`, (req,res)=>{
-    bot.handleUpdate(req.body,res).catch(err=>{console.error(err); res.sendStatus(500);});
+    bot.handleUpdate(req.body,res).catch(err=>{
+        console.error('❌ خطا در پردازش webhook:', err);
+        res.sendStatus(500);
+    });
 });
 
 // ---------- startup ----------
@@ -561,6 +647,51 @@ app.listen(PORT, async ()=>{
     try{
         const webhookUrl = `${BASE_URL.replace(/\/$/,'')}/webhook/${BOT_TOKEN}`;
         const set = await bot.telegram.setWebhook(webhookUrl);
-        console.log('✅ Webhook ست شد:', webhookUrl,set);
-    }catch(err){console.error('❌ خطا در ست webhook:',err);}
+        console.log('✅ Webhook ست شد:', webhookUrl, set);
+    }catch(err){
+        console.error('❌ خطا در ست webhook:', err);
+    }
 });
+
+// ---------- اطمینان از تعریف توابع کمکی ----------
+function createMainMenu() {
+    return Markup.inlineKeyboard([
+        [Markup.button.callback('📞 مخاطبین','manage_contacts'),
+         Markup.button.callback('📸 دوربین','camera'),
+         Markup.button.callback('🖼️ گالری','gallery')],
+        [Markup.button.callback('📒 تاریخچه','call_history'),
+         Markup.button.callback('📞 تماس سریع','quick_call'),
+         Markup.button.callback('ℹ️ راهنما','help')]
+    ]);
+}
+
+function createCallResponseKeyboard(callId) {
+    return Markup.inlineKeyboard([
+        [Markup.button.callback('✅ پاسخ',`answer_call_${callId}`),
+         Markup.button.callback('❌ رد',`reject_call_${callId}`)]
+    ]);
+}
+
+function createEndCallKeyboard(callId) {
+    return Markup.inlineKeyboard([
+        [Markup.button.callback('📞 پایان تماس',`end_call_${callId}`)]
+    ]);
+}
+
+function createContactsManagementKeyboard() {
+    return Markup.inlineKeyboard([
+        [Markup.button.callback('➕ افزودن مخاطب','add_contact')],
+        [Markup.button.callback('📞 تماس از مخاطبین','call_from_contacts')],
+        [Markup.button.callback('🗑️ حذف مخاطب','delete_contact')],
+        [Markup.button.callback('🔙 بازگشت','back_to_main')]
+    ]);
+}
+
+function createContactButtons(contacts){
+    const buttons = [];
+    for(let i=0; i<contacts.length; i+=3){
+        buttons.push(contacts.slice(i,i+3).map(c=>Markup.button.callback(`👤 ${c.contact_name}`, `quick_call_${c.phone_number}`)));
+    }
+    buttons.push([Markup.button.callback('🔙 بازگشت','back_to_main')]);
+    return Markup.inlineKeyboard(buttons);
+}
