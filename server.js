@@ -1,13 +1,3 @@
-/**
- * full-featured Telegram call-bot (webhook-only)
- * قابلیت‌ها:
- * - تماس با mention یا تماس سریع
- * - مدیریت مخاطبین
- * - گالری عکس و فیلم
- * - ریپلای بین گروه‌ها
- * - persist با Supabase یا حافظه
- */
-
 const { Telegraf, Markup, session } = require('telegraf');
 const express = require('express');
 const { v4: uuidv4 } = require('uuid');
@@ -40,7 +30,6 @@ global.gallery = global.gallery || { PHOTO: [], FILM: [] };
 const bot = new Telegraf(BOT_TOKEN);
 const app = express();
 app.use(express.json());
-
 // ---------- session و وضعیت کاربر ----------
 bot.use(session({
     defaultSession: () => ({
@@ -99,6 +88,15 @@ function createContactsManagementKeyboard() {
         [Markup.button.callback('🗑️ حذف مخاطب','delete_contact')],
         [Markup.button.callback('🔙 بازگشت','back_to_main')]
     ]);
+}
+
+function createContactButtons(contacts){
+    const buttons = [];
+    for(let i=0; i<contacts.length; i+=3){
+        buttons.push(contacts.slice(i,i+3).map(c=>Markup.button.callback(`👤 ${c.contact_name}`, `quick_call_${c.phone_number}`)));
+    }
+    buttons.push([Markup.button.callback('🔙 بازگشت','back_to_main')]);
+    return Markup.inlineKeyboard(buttons);
 }
 
 async function findUserByPhone(phone){
@@ -258,12 +256,14 @@ bot.action(/del_contact_(.+)/, async ctx => {
     await ctx.reply(`✅ مخاطب با شماره ${phone} حذف شد.`);
     ctx.answerCbQuery();
 });
-
 // ---------- تاریخچه تماس ----------
 bot.command('call_history', async ctx => {
     let history = [];
     if(supabase){
-        const { data } = await supabase.from('call_history').select('*').or(`caller_id.eq.${ctx.from.id},receiver_id.eq.${ctx.from.id}`).order('started_at', { ascending: false });
+        const { data } = await supabase.from('call_history')
+            .select('*')
+            .or(`caller_id.eq.${ctx.from.id},receiver_id.eq.${ctx.from.id}`)
+            .order('started_at', { ascending: false });
         history = data || [];
     } else {
         history = global.callHistory.filter(c=>c.callerId===ctx.from.id||c.receiverId===ctx.from.id);
@@ -276,6 +276,7 @@ bot.command('call_history', async ctx => {
     });
     await ctx.reply(msg);
 });
+
 // ---------- تماس mention-based ----------
 bot.on('text', async (ctx, next) => {
     const text = ctx.message.text || '';
@@ -290,7 +291,8 @@ bot.on('text', async (ctx, next) => {
     // بررسی ثبت کاربر تماس گیرنده
     let callerPhone = null, callerGroup = null;
     if(supabase){
-        const { data } = await supabase.from('users').select('phone_number,group_id').eq('user_id', ctx.from.id).maybeSingle();
+        const { data } = await supabase.from('users').select('phone_number,group_id')
+            .eq('user_id', ctx.from.id).maybeSingle();
         if(!data) return ctx.reply('❌ ابتدا /register کنید.');
         callerPhone = data.phone_number; callerGroup = data.group_id;
     } else if(global.users[ctx.from.id]){
@@ -341,7 +343,6 @@ bot.on('text', async (ctx, next) => {
 
     await persistActiveCall(callData);
 });
-
 // ---------- پاسخ تماس ----------
 bot.action(/answer_call_(.+)/, async ctx => {
     const callId = ctx.match[1];
@@ -633,6 +634,7 @@ bot.action('help', async ctx => {
 - ➕ افزودن مخاطب / 🗑️ حذف مخاطب`);
     ctx.answerCbQuery();
 });
+
 // ---------- webhook ----------
 app.post(`/webhook/${BOT_TOKEN}`, (req,res)=>{
     bot.handleUpdate(req.body,res).catch(err=>{
@@ -652,8 +654,8 @@ app.listen(PORT, async ()=>{
         console.error('❌ خطا در ست webhook:', err);
     }
 });
+// ---------- توابع کمکی نهایی ----------
 
-// ---------- اطمینان از تعریف توابع کمکی ----------
 function createMainMenu() {
     return Markup.inlineKeyboard([
         [Markup.button.callback('📞 مخاطبین','manage_contacts'),
@@ -695,3 +697,16 @@ function createContactButtons(contacts){
     buttons.push([Markup.button.callback('🔙 بازگشت','back_to_main')]);
     return Markup.inlineKeyboard(buttons);
 }
+
+// ---------- جمع‌بندی ----------
+/**
+ * این ربات:
+ * - تماس با mention یا تماس سریع بین کاربران
+ * - مدیریت مخاطبین (افزودن، حذف، تماس)
+ * - ثبت و مشاهده گالری عکس و فیلم
+ * - ریپلای پیام بین گروه‌ها
+ * - ذخیره‌سازی persist با Supabase یا حافظه محلی
+ * - نمایش تاریخچه تماس‌ها
+ * - منوی اصلی با دکمه‌های دسترسی سریع
+ * - پشتیبانی کامل webhook
+ */
